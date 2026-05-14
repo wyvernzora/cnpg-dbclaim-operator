@@ -1,0 +1,76 @@
+# Scenario B: multiple microservices share one DB, each owning its own
+# schema. Per-schema form on RoleClaim.
+---
+apiVersion: cnpg.wyvernzora.io/v1alpha1
+kind: DatabaseClaim
+metadata:
+  name: orders-domain
+  namespace: app-team-a
+spec:
+  databaseName: orders_domain
+  clusterRef:
+    name: shared-pg
+    namespace: cnpg-system
+  schemas:
+    - ordering
+    - shipping
+    - fulfillment
+    - shared
+  deletionPolicy: Retain
+---
+apiVersion: cnpg.wyvernzora.io/v1alpha1
+kind: RoleClaim
+metadata:
+  name: ordering-svc
+  namespace: app-team-a
+spec:
+  databaseClaimRef:
+    name: orders-domain
+  roleName: ordering_svc
+  schemas:
+    - name: ordering
+      access: Owner
+    - name: shared
+      access: ReadWrite
+    - name: shipping
+      access: ReadOnly
+    - name: fulfillment
+      access: ReadOnly
+---
+apiVersion: cnpg.wyvernzora.io/v1alpha1
+kind: RoleClaim
+metadata:
+  name: shipping-svc
+  namespace: app-team-a
+spec:
+  databaseClaimRef:
+    name: orders-domain
+  roleName: shipping_svc
+  schemas:
+    - name: shipping
+      access: Owner
+    - name: shared
+      access: ReadWrite
+    - name: ordering
+      access: ReadOnly
+    - name: fulfillment
+      access: ReadOnly
+---
+apiVersion: cnpg.wyvernzora.io/v1alpha1
+kind: RoleClaim
+metadata:
+  name: bi-reader
+  namespace: app-team-a
+spec:
+  databaseClaimRef:
+    name: orders-domain
+  roleName: bi_reader
+  schemas:
+    - name: ordering
+      access: ReadOnly
+    - name: shipping
+      access: ReadOnly
+    - name: fulfillment
+      access: ReadOnly
+    - name: shared
+      access: ReadOnly

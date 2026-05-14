@@ -60,17 +60,20 @@ type DatabaseClaimSpec struct {
 	// Immutable.
 	ClusterRef ClusterReference `json:"clusterRef"`
 
-	// Extensions to install in the database. Forwarded to the peer CNPG
-	// Database CR for reconciliation.
+	// Extensions to install in the database. Each entry is the Postgres
+	// extension name (e.g., "pgcrypto"). Installed at the default version
+	// via CREATE EXTENSION IF NOT EXISTS. Version updates are out of scope
+	// in v1.
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:items:Pattern=`^[a-z_][a-z0-9_]{0,62}$`
 	Extensions []string `json:"extensions,omitempty"`
 
-	// Schemas to ensure in the database. Forwarded to the peer CNPG Database
-	// CR; CNPG creates them with ownership initially set to the bootstrap
-	// owner. Ownership transfer happens when a matching Owner RoleClaim
-	// reconciles.
+	// Schemas to ensure in the database. Each entry is created with
+	// CREATE SCHEMA IF NOT EXISTS, initially owned by the superuser.
+	// Ownership transfers when a matching Owner RoleClaim reconciles.
+	// Removing an entry from this list is a no-op in v1; schemas must be
+	// dropped manually.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:items:Pattern=`^[a-z_][a-z0-9_]{0,62}$`

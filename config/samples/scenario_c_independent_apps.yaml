@@ -1,0 +1,53 @@
+# Scenario C: two co-deployed apps with independent data. Separate
+# DatabaseClaims on the same Cluster — full isolation, no cross-DB joins
+# possible.
+---
+apiVersion: cnpg.wyvernzora.io/v1alpha1
+kind: DatabaseClaim
+metadata:
+  name: agent
+  namespace: app-team-a
+spec:
+  databaseName: agent
+  clusterRef:
+    name: shared-pg
+    namespace: cnpg-system
+  schemas:
+    - app
+  deletionPolicy: Delete
+---
+apiVersion: cnpg.wyvernzora.io/v1alpha1
+kind: RoleClaim
+metadata:
+  name: agent
+  namespace: app-team-a
+spec:
+  databaseClaimRef:
+    name: agent
+  roleName: agent
+  access: Owner
+---
+apiVersion: cnpg.wyvernzora.io/v1alpha1
+kind: DatabaseClaim
+metadata:
+  name: scheduler
+  namespace: app-team-a
+spec:
+  databaseName: scheduler
+  clusterRef:
+    name: shared-pg
+    namespace: cnpg-system
+  schemas:
+    - app
+  deletionPolicy: Delete
+---
+apiVersion: cnpg.wyvernzora.io/v1alpha1
+kind: RoleClaim
+metadata:
+  name: scheduler
+  namespace: app-team-a
+spec:
+  databaseClaimRef:
+    name: scheduler
+  roleName: scheduler
+  access: Owner

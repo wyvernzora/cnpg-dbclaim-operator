@@ -1,0 +1,59 @@
+# Default values for dbclaim-operator.
+
+# Whether to install the CRDs as part of the chart. Set to false if CRDs are
+# managed out of band (e.g., via Argo CD sync waves or a separate release).
+installCRDs: true
+
+image:
+  repository: ghcr.io/wyvernzora/cnpg-dbclaim-operator
+  tag: ""  # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Number of operator replicas. Leader election is enabled, so >1 is safe.
+replicaCount: 1
+
+# Enable leader election. Required if replicaCount > 1.
+leaderElection: true
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+# Pod-level security context. Distroless image runs as 65532.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+  runAsUser: 65532
+  runAsGroup: 65532
+
+# Service account used by the operator.
+serviceAccount:
+  create: true
+  name: ""  # defaults to chart fullname
+  annotations: {}
+
+# Metrics service.
+metrics:
+  enabled: true
+  port: 8080
+  serviceType: ClusterIP
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Additional pod annotations (e.g., for Prometheus scrape).
+podAnnotations: {}

@@ -1,0 +1,70 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dbclaim-operator.fullname" . }}-manager
+  labels:
+    {{- include "dbclaim-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["cnpg.wyvernzora.io"]
+    resources: [databaseclaims, roleclaims]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["cnpg.wyvernzora.io"]
+    resources: [databaseclaims/status, roleclaims/status]
+    verbs: [get, update, patch]
+  - apiGroups: ["cnpg.wyvernzora.io"]
+    resources: [databaseclaims/finalizers, roleclaims/finalizers]
+    verbs: [update]
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: [clusters]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dbclaim-operator.fullname" . }}-manager
+  labels:
+    {{- include "dbclaim-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dbclaim-operator.fullname" . }}-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "dbclaim-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+{{- if .Values.leaderElection }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "dbclaim-operator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dbclaim-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "dbclaim-operator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dbclaim-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "dbclaim-operator.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "dbclaim-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

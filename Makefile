@@ -28,8 +28,15 @@ generate: controller-gen ## Generate DeepCopy methods.
 	$(CONTROLLER_GEN) object:headerFile=hack/boilerplate.go.txt paths=./api/...
 
 .PHONY: manifests
-manifests: controller-gen ## Generate CRD and RBAC manifests.
+manifests: controller-gen ## Generate CRD and RBAC manifests and sync into the chart.
 	$(CONTROLLER_GEN) crd rbac:roleName=manager-role webhook paths=./... output:crd:artifacts:config=config/crd/bases output:rbac:artifacts:config=config/rbac
+	@mkdir -p charts/dbclaim-operator/templates/crds
+	@for src in config/crd/bases/cnpg.wyvernzora.io_databaseclaims.yaml config/crd/bases/cnpg.wyvernzora.io_roleclaims.yaml; do \
+		base=$$(basename $$src | sed -e 's|cnpg.wyvernzora.io_||' -e 's|s.yaml|.yaml|'); \
+		dst=charts/dbclaim-operator/templates/crds/$$base; \
+		{ echo '{{- if .Values.installCRDs -}}'; cat $$src; echo '{{- end }}'; } | \
+		sed 's|controller-gen.kubebuilder.io/version: v0.16.5|controller-gen.kubebuilder.io/version: v0.16.5\n    helm.sh/resource-policy: keep|' > $$dst; \
+	done
 
 .PHONY: fmt
 fmt: ## Run go fmt.
