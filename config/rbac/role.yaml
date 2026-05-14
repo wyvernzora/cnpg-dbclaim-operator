@@ -9,13 +9,18 @@ rules:
   resources:
   - secrets
   verbs:
+  - create
+  - delete
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - cnpg.wyvernzora.io
   resources:
   - databaseclaims
+  - roleclaims
   verbs:
   - create
   - delete
@@ -28,24 +33,18 @@ rules:
   - cnpg.wyvernzora.io
   resources:
   - databaseclaims/finalizers
+  - roleclaims/finalizers
   verbs:
   - update
 - apiGroups:
   - cnpg.wyvernzora.io
   resources:
   - databaseclaims/status
+  - roleclaims/status
   verbs:
   - get
   - patch
   - update
-- apiGroups:
-  - cnpg.wyvernzora.io
-  resources:
-  - roleclaims
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - postgresql.cnpg.io
   resources:
