@@ -1,0 +1,56 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - cnpg.wyvernzora.io
+  resources:
+  - databaseclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - cnpg.wyvernzora.io
+  resources:
+  - databaseclaims/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - cnpg.wyvernzora.io
+  resources:
+  - databaseclaims/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - cnpg.wyvernzora.io
+  resources:
+  - roleclaims
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - postgresql.cnpg.io
+  resources:
+  - clusters
+  verbs:
+  - get
+  - list
+  - watch

@@ -30,6 +30,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	cnpgclaimv1alpha1 "github.com/wyvernzora/cnpg-dbclaim-operator/api/v1alpha1"
+	"github.com/wyvernzora/cnpg-dbclaim-operator/internal/controller"
 )
 
 var (
@@ -81,7 +82,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Controllers will be wired up in subsequent commits.
+	if err := (&controller.DatabaseClaimReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DatabaseClaim")
+		os.Exit(1)
+	}
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
