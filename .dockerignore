@@ -1,0 +1,11 @@
+bin/
+.git/
+**/*.md
+charts/
+config/
+hack/
+PROJECT
+Dockerfile
+.dockerignore
+.gitignore
+cover.out
