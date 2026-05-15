@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -79,6 +80,13 @@ func main() {
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
+		os.Exit(1)
+	}
+
+	// Field indexes must be registered once per manager, before any
+	// SetupWithManager calls. Both reconcilers consume the same indexes.
+	if err := controller.SetupFieldIndexes(context.Background(), mgr); err != nil {
+		setupLog.Error(err, "unable to set up field indexes")
 		os.Exit(1)
 	}
 
