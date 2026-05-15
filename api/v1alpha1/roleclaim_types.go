@@ -38,8 +38,8 @@ const (
 	// ALTER DATABASE OWNER TO.
 	AccessOwner AccessLevel = "Owner"
 
-	// AccessReadWrite grants USAGE on the schema plus full DML on tables and
-	// sequences.
+	// AccessReadWrite grants USAGE/CREATE on the schema plus full DML on
+	// tables and sequences.
 	AccessReadWrite AccessLevel = "ReadWrite"
 
 	// AccessReadOnly grants USAGE on the schema plus SELECT on tables and

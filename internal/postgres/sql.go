@@ -244,6 +244,7 @@ func ApplySchemaGrants(ctx context.Context, conn *pgx.Conn, role, schema string,
 	case AccessOwner:
 		// USAGE only; ownership transfer happens via AlterSchemaOwner.
 	case AccessReadWrite:
+		stmts[0] = fmt.Sprintf("GRANT USAGE, CREATE ON SCHEMA %s TO %s", Quote(schema), Quote(role))
 		stmts = append(stmts,
 			fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES ON ALL TABLES IN SCHEMA %s TO %s", Quote(schema), Quote(role)),
 			fmt.Sprintf("GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA %s TO %s", Quote(schema), Quote(role)),
