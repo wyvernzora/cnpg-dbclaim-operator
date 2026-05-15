@@ -329,4 +329,3 @@ var _ = Describe("RoleClaim", func() {
 		}, 10*time.Second, 250*time.Millisecond).Should(BeTrue())
 	})
 })
-

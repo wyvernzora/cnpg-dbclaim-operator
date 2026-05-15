@@ -15,7 +15,7 @@ func TestValidateIdentifier(t *testing.T) {
 		{"_underscore_start", true},
 		{"with_digits_123", true},
 		{"a", true},
-		{"Orders", false},        // uppercase rejected
+		{"Orders", false},         // uppercase rejected
 		{"1leading_digit", false}, // digit start rejected
 		{"contains-dash", false},
 		{"contains space", false},
