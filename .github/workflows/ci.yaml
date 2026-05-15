@@ -55,7 +55,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-      pull-requests: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,13 +78,14 @@ jobs:
           find_comment() {
             gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
               --jq ".[] | select(.body | contains(\"$marker\")) | .id" |
-              head -n 1
+              head -n 1 || true
           }
 
           if git diff --quiet "$BASE_SHA...HEAD" -- "${paths[@]}"; then
             comment_id="$(find_comment)"
             if [ -n "$comment_id" ]; then
-              gh api --method DELETE "repos/$REPO/issues/comments/$comment_id" >/dev/null
+              gh api --method DELETE "repos/$REPO/issues/comments/$comment_id" >/dev/null || \
+                echo "::warning::Unable to delete stale CRD/RBAC diff comment."
             fi
             echo "No CRD/RBAC diff against $BASE_REF."
             exit 0
@@ -117,9 +118,15 @@ jobs:
           comment_id="$(find_comment)"
           body="$(cat "$body_file")"
           if [ -n "$comment_id" ]; then
-            gh api --method PATCH "repos/$REPO/issues/comments/$comment_id" -f body="$body" >/dev/null
+            gh api --method PATCH "repos/$REPO/issues/comments/$comment_id" -f body="$body" >/dev/null || {
+              echo "::warning::Unable to update CRD/RBAC diff comment; writing diff to job summary."
+              cat "$body_file" >> "$GITHUB_STEP_SUMMARY"
+            }
           else
-            gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
+            gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null || {
+              echo "::warning::Unable to create CRD/RBAC diff comment; writing diff to job summary."
+              cat "$body_file" >> "$GITHUB_STEP_SUMMARY"
+            }
           fi
 
   lint:
