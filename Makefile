@@ -16,7 +16,7 @@ HELM ?= helm
 
 LOCALBIN ?= $(shell pwd)/bin
 
-CONTROLLER_TOOLS_VERSION ?= v0.16.5
+CONTROLLER_TOOLS_VERSION ?= v0.21.0
 KUSTOMIZE_VERSION ?= v5.8.1
 ENVTEST_K8S_VERSION ?= 1.31.0
 GOLANGCI_LINT_VERSION ?= v2.12.2
@@ -42,7 +42,7 @@ manifests: controller-gen ## Generate CRD and RBAC manifests and sync into the c
 		base=$$(basename $$src | sed -e 's|cnpg.wyvernzora.io_||' -e 's|s.yaml|.yaml|'); \
 		dst=charts/dbclaim-operator/templates/crds/$$base; \
 		{ echo '{{- if .Values.installCRDs -}}'; cat $$src; echo '{{- end }}'; } | \
-		sed 's|controller-gen.kubebuilder.io/version: v0.16.5|controller-gen.kubebuilder.io/version: v0.16.5\n    helm.sh/resource-policy: keep|' > $$dst; \
+		awk '{ print; if ($$0 ~ /controller-gen.kubebuilder.io\/version:/) print "    helm.sh/resource-policy: keep" }' > $$dst; \
 	done
 
 .PHONY: fmt
@@ -151,7 +151,9 @@ e2e-local-clean: ## Bring up kind, run e2e, and always delete the cluster.
 
 .PHONY: controller-gen
 controller-gen: $(LOCALBIN)
-	@test -x $(CONTROLLER_GEN) || GOBIN=$(LOCALBIN) $(GO) install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
+	@if ! test -x $(CONTROLLER_GEN) || ! $(CONTROLLER_GEN) --version | grep -q "$(CONTROLLER_TOOLS_VERSION)"; then \
+		GOBIN=$(LOCALBIN) $(GO) install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION); \
+	fi
 
 .PHONY: kustomize
 kustomize: $(LOCALBIN)
