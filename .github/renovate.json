@@ -1,0 +1,123 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":semanticCommitTypeAll(chore)"
+  ],
+  "timezone": "America/Los_Angeles",
+  "labels": [
+    "dependencies"
+  ],
+  "prHourlyLimit": 2,
+  "packageRules": [
+    {
+      "description": "Keep Kubernetes libraries together.",
+      "matchPackageNames": [
+        "/^k8s\\.io\\//",
+        "sigs.k8s.io/controller-runtime"
+      ],
+      "groupName": "kubernetes go modules"
+    },
+    {
+      "description": "Keep CloudNativePG API and e2e runtime pin together.",
+      "matchPackageNames": [
+        "github.com/cloudnative-pg/cloudnative-pg"
+      ],
+      "groupName": "cloudnative-pg"
+    },
+    {
+      "description": "Group controller code generation and local tooling pins.",
+      "matchPackageNames": [
+        "sigs.k8s.io/controller-tools",
+        "sigs.k8s.io/kustomize/kustomize/v5",
+        "github.com/golangci/golangci-lint/cmd/golangci-lint"
+      ],
+      "groupName": "go tooling"
+    },
+    {
+      "description": "Group GitHub Actions updates.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "github actions"
+    },
+    {
+      "description": "Group container base image updates.",
+      "matchManagers": [
+        "dockerfile",
+        "custom.regex"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "groupName": "container images"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update the CloudNativePG runtime version used by e2e installs.",
+      "managerFilePatterns": [
+        "/^Makefile$/"
+      ],
+      "matchStrings": [
+        "CNPG_VERSION\\s*\\?=\\s*(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "github.com/cloudnative-pg/cloudnative-pg",
+      "datasourceTemplate": "go",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Update controller-gen pinned in the Makefile.",
+      "managerFilePatterns": [
+        "/^Makefile$/"
+      ],
+      "matchStrings": [
+        "CONTROLLER_TOOLS_VERSION\\s*\\?=\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "sigs.k8s.io/controller-tools",
+      "datasourceTemplate": "go",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Update kustomize pinned in the Makefile.",
+      "managerFilePatterns": [
+        "/^Makefile$/"
+      ],
+      "matchStrings": [
+        "KUSTOMIZE_VERSION\\s*\\?=\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "sigs.k8s.io/kustomize/kustomize/v5",
+      "datasourceTemplate": "go",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Update golangci-lint pinned in the Makefile.",
+      "managerFilePatterns": [
+        "/^Makefile$/"
+      ],
+      "matchStrings": [
+        "GOLANGCI_LINT_VERSION\\s*\\?=\\s*(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "github.com/golangci/golangci-lint/cmd/golangci-lint",
+      "datasourceTemplate": "go",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Update the kind node image used by the local and CI e2e cluster.",
+      "managerFilePatterns": [
+        "/^hack/e2e/kind-config\\.yaml$/"
+      ],
+      "matchStrings": [
+        "image:\\s*(?<depName>kindest/node):(?<currentValue>v?\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "semver"
+    }
+  ]
+}
