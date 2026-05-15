@@ -11,6 +11,7 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
+GOLANGCI_LINT_MODULE ?= github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 HELM ?= helm
 
 LOCALBIN ?= $(shell pwd)/bin
@@ -162,7 +163,7 @@ envtest: $(LOCALBIN)
 
 .PHONY: golangci-lint
 golangci-lint: $(LOCALBIN)
-	@test -x $(GOLANGCI_LINT) || GOBIN=$(LOCALBIN) $(GO) install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	@test -x $(GOLANGCI_LINT) || GOBIN=$(LOCALBIN) $(GO) install $(GOLANGCI_LINT_MODULE)@$(GOLANGCI_LINT_VERSION)
 
 $(LOCALBIN):
 	@mkdir -p $(LOCALBIN)
