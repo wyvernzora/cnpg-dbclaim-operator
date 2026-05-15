@@ -48,16 +48,20 @@ const (
 	AccessReadOnly AccessLevel = "ReadOnly"
 )
 
-// DefaultPrivilegeGrant is one (writer-role, schema) pair on which this
-// RoleClaim's role has been granted default SELECT privileges via
-// ALTER DEFAULT PRIVILEGES. Tracked in status so a narrowing reconcile can
-// revoke the diff.
+// DefaultPrivilegeGrant is one (writer-role, schema, access) tuple on which
+// this RoleClaim's role has been granted default privileges via ALTER DEFAULT
+// PRIVILEGES. Tracked in status so a narrowing reconcile can revoke the diff.
 type DefaultPrivilegeGrant struct {
 	// Writer is the Postgres role whose future objects this claim's role
-	// receives SELECT on.
+	// receives privileges on.
 	Writer string `json:"writer"`
 	// Schema is the schema scope of the default-privilege grant.
 	Schema string `json:"schema"`
+	// Access is the privilege profile applied to future objects. Empty means
+	// ReadOnly for compatibility with status written by older operator
+	// versions.
+	// +optional
+	Access AccessLevel `json:"access,omitempty"`
 }
 
 // SchemaGrant pairs a schema name with an access level.
@@ -165,9 +169,9 @@ type RoleClaimStatus struct {
 	// +listMapKey=name
 	ResolvedSchemas []SchemaGrant `json:"resolvedSchemas,omitempty"`
 
-	// AppliedDefaultPrivileges records the (writer, schema) pairs for which
-	// this RoleClaim's role currently holds default SELECT privileges. The
-	// reconciler diffs against this list each pass: pairs no longer in the
+	// AppliedDefaultPrivileges records the (writer, schema, access) tuples for
+	// which this RoleClaim's role currently holds default privileges. The
+	// reconciler diffs against this list each pass: tuples no longer in the
 	// intended universe are revoked via ALTER DEFAULT PRIVILEGES ... REVOKE.
 	// +optional
 	// +listType=map

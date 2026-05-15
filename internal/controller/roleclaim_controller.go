@@ -47,8 +47,8 @@ const roleClaimSecretLabel = "cnpg.wyvernzora.io/roleclaim" // #nosec G101 -- Ku
 type RoleClaimReconciler struct {
 	client.Client
 	// APIReader bypasses the controller-runtime cache and reads directly from
-	// the apiserver. Used only for the owner-conflict check so that a sibling
-	// freshly Create()-d cannot escape detection via cache lag.
+	// the apiserver. Used for conflict checks so a freshly Create()-d claim
+	// cannot escape detection via cache lag.
 	APIReader client.Reader
 	Scheme    *runtime.Scheme
 }
@@ -56,6 +56,7 @@ type RoleClaimReconciler struct {
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=roleclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=roleclaims/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=roleclaims/finalizers,verbs=update
+// +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=databaseclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile implements the RoleClaim reconcile loop.
@@ -124,6 +125,17 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 		return r.failPending(ctx, claim)
 	}
 
+	roleName := resolvedRoleName(claim)
+	roleConflict, err := r.findRoleNameConflict(ctx, claim, &dbClaim, roleName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if roleConflict != "" {
+		setCondition(&claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonRoleNameConflict, roleConflict)
+		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonRoleNameConflict, roleConflict)
+		return r.failPending(ctx, claim)
+	}
+
 	// Resolve cluster connection.
 	target, err := cnpgresolver.Resolve(ctx, r.Client, dbClaim.Spec.ClusterRef.Name, dbClaim.Spec.ClusterRef.Namespace)
 	if err != nil {
@@ -133,7 +145,6 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 	}
 
 	// Materialize Secret (password is generated once, on first reconcile).
-	roleName := resolvedRoleName(claim)
 	secretName := claim.Name + "-credentials"
 	password, err := r.ensureSecret(ctx, claim, secretName, secretpkg.Credentials{
 		Host:   target.Host,
@@ -269,7 +280,7 @@ func (r *RoleClaimReconciler) applyReflex(
 	// dropped out. Failures abort without updating status; the next reconcile
 	// retries the same diff from the unchanged status.
 	for _, g := range defaultPrivilegesToRevoke(claim.Status.AppliedDefaultPrivileges, newAsReader) {
-		if err := postgres.AlterDefaultPrivilegesRevokeSelect(ctx, dbConn, g.Writer, thisRole, g.Schema); err != nil {
+		if err := postgres.AlterDefaultPrivilegesRevoke(ctx, dbConn, g.Writer, thisRole, g.Schema, postgres.AccessLevel(defaultPrivilegeAccess(g))); err != nil {
 			return nil, err
 		}
 	}
@@ -279,17 +290,17 @@ func (r *RoleClaimReconciler) applyReflex(
 	// involve this claim — that's how a sibling reconcile reseeds entries
 	// after a sibling-side downgrade.
 	for _, writer := range tuples {
-		if writer.access != cnpgclaimv1alpha1.AccessOwner && writer.access != cnpgclaimv1alpha1.AccessReadWrite {
+		if !isDefaultPrivilegeWriter(writer.access) {
 			continue
 		}
 		for _, reader := range tuples {
-			if reader.access != cnpgclaimv1alpha1.AccessReadOnly {
+			if !isDefaultPrivilegeReader(reader.access) {
 				continue
 			}
 			if reader.schema != writer.schema || reader.role == writer.role {
 				continue
 			}
-			if err := postgres.AlterDefaultPrivilegesGrantSelect(ctx, dbConn, writer.role, reader.role, writer.schema); err != nil {
+			if err := postgres.AlterDefaultPrivilegesGrant(ctx, dbConn, writer.role, reader.role, writer.schema, postgres.AccessLevel(reader.access)); err != nil {
 				return nil, err
 			}
 		}
@@ -332,11 +343,11 @@ func buildDefaultPrivilegeTuples(
 func defaultPrivilegesAsReader(tuples []defaultPrivilegeTuple, thisRole string) []cnpgclaimv1alpha1.DefaultPrivilegeGrant {
 	out := []cnpgclaimv1alpha1.DefaultPrivilegeGrant{}
 	for _, writer := range tuples {
-		if writer.access != cnpgclaimv1alpha1.AccessOwner && writer.access != cnpgclaimv1alpha1.AccessReadWrite {
+		if !isDefaultPrivilegeWriter(writer.access) {
 			continue
 		}
 		for _, reader := range tuples {
-			if reader.access != cnpgclaimv1alpha1.AccessReadOnly {
+			if !isDefaultPrivilegeReader(reader.access) {
 				continue
 			}
 			if reader.schema != writer.schema || reader.role == writer.role {
@@ -346,6 +357,7 @@ func defaultPrivilegesAsReader(tuples []defaultPrivilegeTuple, thisRole string) 
 				out = append(out, cnpgclaimv1alpha1.DefaultPrivilegeGrant{
 					Writer: writer.role,
 					Schema: writer.schema,
+					Access: reader.access,
 				})
 			}
 		}
@@ -356,6 +368,9 @@ func defaultPrivilegesAsReader(tuples []defaultPrivilegeTuple, thisRole string) 
 
 func sortedDefaultPrivilegeGrantsCopy(in []cnpgclaimv1alpha1.DefaultPrivilegeGrant) []cnpgclaimv1alpha1.DefaultPrivilegeGrant {
 	out := append([]cnpgclaimv1alpha1.DefaultPrivilegeGrant{}, in...)
+	for i := range out {
+		out[i].Access = defaultPrivilegeAccess(out[i])
+	}
 	sortDefaultPrivilegeGrants(out)
 	return out
 }
@@ -381,7 +396,7 @@ func defaultPrivilegesToRevoke(
 
 // defaultPrivKey is the composite key used to diff DefaultPrivilegeGrant lists.
 func defaultPrivKey(g cnpgclaimv1alpha1.DefaultPrivilegeGrant) string {
-	return g.Writer + "\x00" + g.Schema
+	return g.Writer + "\x00" + g.Schema + "\x00" + string(defaultPrivilegeAccess(g))
 }
 
 func sortDefaultPrivilegeGrants(g []cnpgclaimv1alpha1.DefaultPrivilegeGrant) {
@@ -389,8 +404,26 @@ func sortDefaultPrivilegeGrants(g []cnpgclaimv1alpha1.DefaultPrivilegeGrant) {
 		if c := cmp.Compare(a.Writer, b.Writer); c != 0 {
 			return c
 		}
-		return cmp.Compare(a.Schema, b.Schema)
+		if c := cmp.Compare(a.Schema, b.Schema); c != 0 {
+			return c
+		}
+		return cmp.Compare(defaultPrivilegeAccess(a), defaultPrivilegeAccess(b))
 	})
+}
+
+func defaultPrivilegeAccess(g cnpgclaimv1alpha1.DefaultPrivilegeGrant) cnpgclaimv1alpha1.AccessLevel {
+	if g.Access == "" {
+		return cnpgclaimv1alpha1.AccessReadOnly
+	}
+	return g.Access
+}
+
+func isDefaultPrivilegeWriter(access cnpgclaimv1alpha1.AccessLevel) bool {
+	return access == cnpgclaimv1alpha1.AccessOwner || access == cnpgclaimv1alpha1.AccessReadWrite
+}
+
+func isDefaultPrivilegeReader(access cnpgclaimv1alpha1.AccessLevel) bool {
+	return access == cnpgclaimv1alpha1.AccessReadOnly || access == cnpgclaimv1alpha1.AccessReadWrite
 }
 
 // revokeDrift compares previously-applied grants (from status.resolvedSchemas)
@@ -536,13 +569,13 @@ func findOwnerConflict(
 	}
 	for i := range siblings {
 		s := &siblings[i]
-		if s.UID == claim.UID {
+		if sameObject(s, claim) {
 			continue
 		}
 		if !s.DeletionTimestamp.IsZero() {
 			continue
 		}
-		if !siblingWins(s, claim) {
+		if !objectWins(s, claim) {
 			continue
 		}
 		siblingGrants, err := resolveSchemas(s, dbClaim)
@@ -560,22 +593,108 @@ func findOwnerConflict(
 	return ""
 }
 
-// siblingWins reports whether s wins ownership against claim under the strict
-// tiebreak: earlier CreationTimestamp first, lower UID on tie.
-func siblingWins(s, claim *cnpgclaimv1alpha1.RoleClaim) bool {
-	if s.CreationTimestamp.Before(&claim.CreationTimestamp) {
-		return true
-	}
-	if claim.CreationTimestamp.Before(&s.CreationTimestamp) {
-		return false
-	}
-	return string(s.UID) < string(claim.UID)
-}
-
 // resolvedRoleName returns the Postgres role name for the claim. spec.roleName
 // is required and pattern-validated by the CRD, so there is nothing to derive.
 func resolvedRoleName(claim *cnpgclaimv1alpha1.RoleClaim) string {
 	return claim.Spec.RoleName
+}
+
+func (r *RoleClaimReconciler) findRoleNameConflict(
+	ctx context.Context,
+	claim *cnpgclaimv1alpha1.RoleClaim,
+	dbClaim *cnpgclaimv1alpha1.DatabaseClaim,
+	roleName string,
+) (string, error) {
+	claims, err := r.allRoleClaims(ctx)
+	if err != nil {
+		return "", err
+	}
+	for i := range claims {
+		other := &claims[i]
+		if sameObject(other, claim) {
+			continue
+		}
+		if !other.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if resolvedRoleName(other) != roleName {
+			continue
+		}
+		otherDBClaim, ok, err := r.parentDatabaseClaim(ctx, other)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			continue
+		}
+		if otherDBClaim.Spec.ClusterRef != dbClaim.Spec.ClusterRef {
+			continue
+		}
+		if !objectWins(other, claim) {
+			continue
+		}
+		return fmt.Sprintf("RoleClaim %q in namespace %q already owns role %q on Cluster %s/%s",
+			other.Name, other.Namespace, roleName, dbClaim.Spec.ClusterRef.Namespace, dbClaim.Spec.ClusterRef.Name), nil
+	}
+	return "", nil
+}
+
+func (r *RoleClaimReconciler) otherRoleClaimOwnsPhysicalRole(
+	ctx context.Context,
+	claim *cnpgclaimv1alpha1.RoleClaim,
+	dbClaim *cnpgclaimv1alpha1.DatabaseClaim,
+	roleName string,
+) (bool, error) {
+	claims, err := r.allRoleClaims(ctx)
+	if err != nil {
+		return false, err
+	}
+	for i := range claims {
+		other := &claims[i]
+		if sameObject(other, claim) {
+			continue
+		}
+		if !other.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if resolvedRoleName(other) != roleName {
+			continue
+		}
+		otherDBClaim, ok, err := r.parentDatabaseClaim(ctx, other)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			continue
+		}
+		if otherDBClaim.Spec.ClusterRef == dbClaim.Spec.ClusterRef {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (r *RoleClaimReconciler) parentDatabaseClaim(ctx context.Context, claim *cnpgclaimv1alpha1.RoleClaim) (*cnpgclaimv1alpha1.DatabaseClaim, bool, error) {
+	var dbClaim cnpgclaimv1alpha1.DatabaseClaim
+	err := r.reader().Get(ctx, types.NamespacedName{Name: claim.Spec.DatabaseClaimRef.Name, Namespace: claim.Namespace}, &dbClaim)
+	if apierrors.IsNotFound(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return &dbClaim, true, nil
+}
+
+func (r *RoleClaimReconciler) allRoleClaims(ctx context.Context) ([]cnpgclaimv1alpha1.RoleClaim, error) {
+	return listRoleClaims(ctx, r.reader())
+}
+
+func (r *RoleClaimReconciler) reader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // isDBClaimReady reports whether the parent DBClaim's Ready condition is True
@@ -635,14 +754,27 @@ func (r *RoleClaimReconciler) reconcileDelete(ctx context.Context, claim *cnpgcl
 	dbErr := r.Get(ctx, dbClaimKey, &dbClaim)
 
 	if dbErr == nil {
-		target, err := cnpgresolver.Resolve(ctx, r.Client, dbClaim.Spec.ClusterRef.Name, dbClaim.Spec.ClusterRef.Namespace)
-		if err == nil {
-			if dropErr := r.dropRole(ctx, &dbClaim, target, claim); dropErr != nil {
-				log.FromContext(ctx).Error(dropErr, "drop role failed")
-				return ctrl.Result{}, dropErr
-			}
-		} else if !isClusterGoneGracePeriodPassed(claim, err) {
+		roleName := claim.Status.RoleName
+		if roleName == "" {
+			roleName = resolvedRoleName(claim)
+		}
+		ownedElsewhere, err := r.otherRoleClaimOwnsPhysicalRole(ctx, claim, &dbClaim, roleName)
+		if err != nil {
 			return ctrl.Result{}, err
+		}
+		if ownedElsewhere {
+			log.FromContext(ctx).Info("another RoleClaim still owns physical role; releasing finalizer without DROP",
+				"role", roleName, "cluster", dbClaim.Spec.ClusterRef)
+		} else {
+			target, err := cnpgresolver.Resolve(ctx, r.Client, dbClaim.Spec.ClusterRef.Name, dbClaim.Spec.ClusterRef.Namespace)
+			if err == nil {
+				if dropErr := r.dropRole(ctx, &dbClaim, target, claim); dropErr != nil {
+					log.FromContext(ctx).Error(dropErr, "drop role failed")
+					return ctrl.Result{}, dropErr
+				}
+			} else if !isClusterGoneGracePeriodPassed(claim, err) {
+				return ctrl.Result{}, err
+			}
 		}
 	} else if !apierrors.IsNotFound(dbErr) {
 		return ctrl.Result{}, dbErr

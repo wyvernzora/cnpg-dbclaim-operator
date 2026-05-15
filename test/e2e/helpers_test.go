@@ -253,6 +253,18 @@ func waitDBReadyReason(ctx context.Context, ns, name, reason string) cnpgclaimv1
 	return got
 }
 
+func waitDBPendingReason(ctx context.Context, ns, name, reason string) cnpgclaimv1alpha1.DatabaseClaim {
+	var got cnpgclaimv1alpha1.DatabaseClaim
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, &got)).To(Succeed())
+		g.Expect(got.Status.Phase).To(Equal(cnpgclaimv1alpha1.DatabaseClaimPhasePending))
+		cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+		g.Expect(cond).NotTo(BeNil())
+		g.Expect(cond.Reason).To(Equal(reason))
+	}, e2eTimeout, e2ePollInterval).Should(Succeed())
+	return got
+}
+
 func waitDBDeletingReason(ctx context.Context, ns, name, reason string) cnpgclaimv1alpha1.DatabaseClaim {
 	var got cnpgclaimv1alpha1.DatabaseClaim
 	Eventually(func(g Gomega) {
@@ -271,6 +283,18 @@ func waitRoleReady(ctx context.Context, ns, name string) cnpgclaimv1alpha1.RoleC
 		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, &got)).To(Succeed())
 		g.Expect(got.Status.Phase).To(Equal(cnpgclaimv1alpha1.RoleClaimPhaseReady))
 		g.Expect(got.Status.CredentialsSecretName).NotTo(BeEmpty())
+	}, e2eTimeout, e2ePollInterval).Should(Succeed())
+	return got
+}
+
+func waitRolePendingReason(ctx context.Context, ns, name, reason string) cnpgclaimv1alpha1.RoleClaim {
+	var got cnpgclaimv1alpha1.RoleClaim
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, &got)).To(Succeed())
+		g.Expect(got.Status.Phase).To(Equal(cnpgclaimv1alpha1.RoleClaimPhasePending))
+		cond := meta.FindStatusCondition(got.Status.Conditions, "RoleReady")
+		g.Expect(cond).NotTo(BeNil())
+		g.Expect(cond.Reason).To(Equal(reason))
 	}, e2eTimeout, e2ePollInterval).Should(Succeed())
 	return got
 }
@@ -319,6 +343,11 @@ func expectExec(ctx context.Context, conn *pgx.Conn, sql string, args ...any) {
 
 func expectQueryRow(ctx context.Context, conn *pgx.Conn, sql string, args ...any) {
 	var n int
+	Expect(conn.QueryRow(ctx, sql, args...).Scan(&n)).To(Succeed())
+}
+
+func expectQueryInt64(ctx context.Context, conn *pgx.Conn, sql string, args ...any) {
+	var n int64
 	Expect(conn.QueryRow(ctx, sql, args...).Scan(&n)).To(Succeed())
 }
 

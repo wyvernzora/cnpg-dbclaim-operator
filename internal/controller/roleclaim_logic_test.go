@@ -12,7 +12,9 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	cnpgclaimv1alpha1 "github.com/wyvernzora/cnpg-dbclaim-operator/api/v1alpha1"
 	cnpgresolver "github.com/wyvernzora/cnpg-dbclaim-operator/internal/cnpg"
@@ -261,6 +263,145 @@ func TestFindOwnerConflict_DeletingSiblingIgnored(t *testing.T) {
 	}
 }
 
+func TestFindDatabaseNameConflict_OldestWins(t *testing.T) {
+	now := metav1.NewTime(time.Now())
+	older := mkDB("older", "app")
+	older.Namespace = "team-a"
+	older.UID = "aaa"
+	older.CreationTimestamp = now
+	older.Spec.DatabaseName = "shared_app"
+	older.Spec.ClusterRef = cnpgclaimv1alpha1.ClusterReference{Name: "pg", Namespace: "cnpg-system"}
+
+	newer := mkDB("newer", "app")
+	newer.Namespace = "team-b"
+	newer.UID = "bbb"
+	newer.CreationTimestamp = now
+	newer.Spec.DatabaseName = "shared_app"
+	newer.Spec.ClusterRef = older.Spec.ClusterRef
+
+	if got := findDatabaseNameConflict(newer, []cnpgclaimv1alpha1.DatabaseClaim{*older}); got == "" {
+		t.Fatal("expected newer DatabaseClaim to lose duplicate database ownership")
+	}
+	if got := findDatabaseNameConflict(older, []cnpgclaimv1alpha1.DatabaseClaim{*newer}); got != "" {
+		t.Fatalf("older DatabaseClaim should win duplicate database ownership, got %q", got)
+	}
+}
+
+func TestFindDatabaseNameConflict_IgnoresDeletingAndDifferentClusters(t *testing.T) {
+	now := metav1.NewTime(time.Now())
+	claim := mkDB("claim", "app")
+	claim.Namespace = "team-a"
+	claim.UID = "claim"
+	claim.CreationTimestamp = now
+	claim.Spec.DatabaseName = "app"
+	claim.Spec.ClusterRef = cnpgclaimv1alpha1.ClusterReference{Name: "pg", Namespace: "cnpg-system"}
+
+	deletingTime := metav1.NewTime(now.Add(time.Minute))
+	deleting := claim.DeepCopy()
+	deleting.Name = "deleting"
+	deleting.UID = "aaa"
+	deleting.CreationTimestamp = metav1.NewTime(now.Add(-time.Hour))
+	deleting.DeletionTimestamp = &deletingTime
+
+	otherCluster := claim.DeepCopy()
+	otherCluster.Name = "other-cluster"
+	otherCluster.UID = "bbb"
+	otherCluster.CreationTimestamp = metav1.NewTime(now.Add(-time.Hour))
+	otherCluster.Spec.ClusterRef.Name = "pg2"
+
+	if got := findDatabaseNameConflict(claim, []cnpgclaimv1alpha1.DatabaseClaim{*deleting, *otherCluster}); got != "" {
+		t.Fatalf("expected no database conflict, got %q", got)
+	}
+	if otherDatabaseClaimOwnsPhysicalDatabase(claim, []cnpgclaimv1alpha1.DatabaseClaim{*deleting, *otherCluster}) {
+		t.Fatal("deleting or different-cluster claims should not protect this physical database")
+	}
+}
+
+func TestFindRoleNameConflict_CrossNamespaceAndDatabaseClaim(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := cnpgclaimv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	now := metav1.NewTime(time.Now())
+	cluster := cnpgclaimv1alpha1.ClusterReference{Name: "pg", Namespace: "cnpg-system"}
+
+	dbA := mkDB("orders", "app")
+	dbA.Namespace = "team-a"
+	dbA.Spec.ClusterRef = cluster
+	dbB := mkDB("billing", "app")
+	dbB.Namespace = "team-b"
+	dbB.Spec.ClusterRef = cluster
+
+	older := mkSugarRC("svc-a", "shared_role", "orders", cnpgclaimv1alpha1.AccessReadWrite)
+	older.Namespace = "team-a"
+	older.UID = "aaa"
+	older.CreationTimestamp = now
+	newer := mkSugarRC("svc-b", "shared_role", "billing", cnpgclaimv1alpha1.AccessReadOnly)
+	newer.Namespace = "team-b"
+	newer.UID = "bbb"
+	newer.CreationTimestamp = now
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dbA, dbB, older, newer).Build()
+	r := &RoleClaimReconciler{Client: c}
+	var storedOlder, storedNewer cnpgclaimv1alpha1.RoleClaim
+	if err := c.Get(t.Context(), types.NamespacedName{Name: older.Name, Namespace: older.Namespace}, &storedOlder); err != nil {
+		t.Fatalf("get older RoleClaim: %v", err)
+	}
+	if err := c.Get(t.Context(), types.NamespacedName{Name: newer.Name, Namespace: newer.Namespace}, &storedNewer); err != nil {
+		t.Fatalf("get newer RoleClaim: %v", err)
+	}
+
+	got, err := r.findRoleNameConflict(t.Context(), &storedNewer, dbB, storedNewer.Spec.RoleName)
+	if err != nil {
+		t.Fatalf("findRoleNameConflict: %v", err)
+	}
+	if got == "" {
+		t.Fatal("expected newer RoleClaim to lose duplicate role ownership across namespaces")
+	}
+
+	got, err = r.findRoleNameConflict(t.Context(), &storedOlder, dbA, storedOlder.Spec.RoleName)
+	if err != nil {
+		t.Fatalf("findRoleNameConflict winner: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("older RoleClaim should win duplicate role ownership, got %q", got)
+	}
+}
+
+func TestOtherRoleClaimOwnsPhysicalRole_IgnoresDeleting(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := cnpgclaimv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	now := metav1.NewTime(time.Now())
+	cluster := cnpgclaimv1alpha1.ClusterReference{Name: "pg", Namespace: "cnpg-system"}
+	db := mkDB("orders", "app")
+	db.Namespace = "team-a"
+	db.Spec.ClusterRef = cluster
+
+	claim := mkSugarRC("svc", "shared_role", "orders", cnpgclaimv1alpha1.AccessReadWrite)
+	claim.Namespace = "team-a"
+	claim.UID = "claim"
+	claim.CreationTimestamp = now
+	deleting := mkSugarRC("deleting", "shared_role", "orders", cnpgclaimv1alpha1.AccessReadOnly)
+	deleting.Namespace = "team-a"
+	deleting.UID = "deleting"
+	deleting.CreationTimestamp = metav1.NewTime(now.Add(-time.Hour))
+	deleting.Finalizers = []string{RoleClaimFinalizer}
+	deletingTime := metav1.NewTime(now.Add(time.Minute))
+	deleting.DeletionTimestamp = &deletingTime
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(db, claim, deleting).Build()
+	r := &RoleClaimReconciler{Client: c}
+	owned, err := r.otherRoleClaimOwnsPhysicalRole(t.Context(), claim, db, claim.Spec.RoleName)
+	if err != nil {
+		t.Fatalf("otherRoleClaimOwnsPhysicalRole: %v", err)
+	}
+	if owned {
+		t.Fatal("deleting RoleClaim should not protect physical role")
+	}
+}
+
 func TestResolvedRoleName_UsesSpecVerbatim(t *testing.T) {
 	rc := mkSugarRC("any-k8s-name", "explicit_role", "orders", cnpgclaimv1alpha1.AccessReadWrite)
 	if got := resolvedRoleName(rc); got != "explicit_role" {
@@ -290,7 +431,7 @@ func TestDefaultPrivilegesToRevoke_WriterReplacement(t *testing.T) {
 	current := []cnpgclaimv1alpha1.DefaultPrivilegeGrant{{Writer: "writer_b", Schema: "s"}}
 
 	got := defaultPrivilegesToRevoke(previous, current)
-	want := []cnpgclaimv1alpha1.DefaultPrivilegeGrant{{Writer: "writer_a", Schema: "s"}}
+	want := []cnpgclaimv1alpha1.DefaultPrivilegeGrant{{Writer: "writer_a", Schema: "s", Access: cnpgclaimv1alpha1.AccessReadOnly}}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("defaultPrivilegesToRevoke mismatch (-want +got):\n%s", diff)
 	}
@@ -303,14 +444,15 @@ func TestDefaultPrivilegesAsReader_ReaderNarrowingDropsWriterSchemaPair(t *testi
 	}
 
 	got := defaultPrivilegesAsReader(tuples, "reader")
-	if len(got) != 0 {
-		t.Fatalf("reader narrowed away from ReadOnly should have no default privileges, got %v", got)
+	want := []cnpgclaimv1alpha1.DefaultPrivilegeGrant{{Writer: "writer", Schema: "s", Access: cnpgclaimv1alpha1.AccessReadWrite}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("ReadWrite reader should receive default privileges (-want +got):\n%s", diff)
 	}
 	toRevoke := defaultPrivilegesToRevoke(
 		[]cnpgclaimv1alpha1.DefaultPrivilegeGrant{{Writer: "writer", Schema: "s"}},
 		got,
 	)
-	wantRevoke := []cnpgclaimv1alpha1.DefaultPrivilegeGrant{{Writer: "writer", Schema: "s"}}
+	wantRevoke := []cnpgclaimv1alpha1.DefaultPrivilegeGrant{{Writer: "writer", Schema: "s", Access: cnpgclaimv1alpha1.AccessReadOnly}}
 	if diff := cmp.Diff(wantRevoke, toRevoke); diff != "" {
 		t.Errorf("defaultPrivilegesToRevoke mismatch (-want +got):\n%s", diff)
 	}
@@ -330,7 +472,7 @@ func TestDefaultPrivilegesAsReader_WriterNarrowingDropsSiblingReaderDesiredSet(t
 		[]cnpgclaimv1alpha1.DefaultPrivilegeGrant{{Writer: "writer", Schema: "s"}},
 		got,
 	)
-	wantRevoke := []cnpgclaimv1alpha1.DefaultPrivilegeGrant{{Writer: "writer", Schema: "s"}}
+	wantRevoke := []cnpgclaimv1alpha1.DefaultPrivilegeGrant{{Writer: "writer", Schema: "s", Access: cnpgclaimv1alpha1.AccessReadOnly}}
 	if diff := cmp.Diff(wantRevoke, toRevoke); diff != "" {
 		t.Errorf("defaultPrivilegesToRevoke mismatch (-want +got):\n%s", diff)
 	}
@@ -344,9 +486,9 @@ func TestDefaultPrivilegeHelpersSortDefensively(t *testing.T) {
 	}
 	gotCopy := sortedDefaultPrivilegeGrantsCopy(previous)
 	wantCopy := []cnpgclaimv1alpha1.DefaultPrivilegeGrant{
-		{Writer: "a_writer", Schema: "a"},
-		{Writer: "a_writer", Schema: "b"},
-		{Writer: "z_writer", Schema: "z"},
+		{Writer: "a_writer", Schema: "a", Access: cnpgclaimv1alpha1.AccessReadOnly},
+		{Writer: "a_writer", Schema: "b", Access: cnpgclaimv1alpha1.AccessReadOnly},
+		{Writer: "z_writer", Schema: "z", Access: cnpgclaimv1alpha1.AccessReadOnly},
 	}
 	if diff := cmp.Diff(wantCopy, gotCopy); diff != "" {
 		t.Errorf("sortedDefaultPrivilegeGrantsCopy mismatch (-want +got):\n%s", diff)
@@ -366,6 +508,27 @@ func TestDefaultPrivilegeHelpersSortDefensively(t *testing.T) {
 	gotDesired := defaultPrivilegesAsReader(tuples, "reader")
 	if diff := cmp.Diff(wantCopy, gotDesired); diff != "" {
 		t.Errorf("defaultPrivilegesAsReader should sort deterministically (-want +got):\n%s", diff)
+	}
+}
+
+func TestDefaultPrivilegesToRevoke_AccessChange(t *testing.T) {
+	previous := []cnpgclaimv1alpha1.DefaultPrivilegeGrant{
+		{Writer: "writer", Schema: "s", Access: cnpgclaimv1alpha1.AccessReadOnly},
+	}
+	current := []cnpgclaimv1alpha1.DefaultPrivilegeGrant{
+		{Writer: "writer", Schema: "s", Access: cnpgclaimv1alpha1.AccessReadWrite},
+	}
+
+	got := defaultPrivilegesToRevoke(previous, current)
+	if diff := cmp.Diff(previous, got); diff != "" {
+		t.Errorf("access change should revoke previous tuple (-want +got):\n%s", diff)
+	}
+}
+
+func TestDefaultPrivilegeAccess_DefaultsToReadOnly(t *testing.T) {
+	g := cnpgclaimv1alpha1.DefaultPrivilegeGrant{Writer: "writer", Schema: "s"}
+	if got := defaultPrivilegeAccess(g); got != cnpgclaimv1alpha1.AccessReadOnly {
+		t.Fatalf("defaultPrivilegeAccess() = %q, want %q", got, cnpgclaimv1alpha1.AccessReadOnly)
 	}
 }
 

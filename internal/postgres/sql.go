@@ -288,10 +288,10 @@ func RevokeAllOnSchema(ctx context.Context, conn *pgx.Conn, role, schema string)
 	return nil
 }
 
-// AlterDefaultPrivilegesGrantSelect registers default privileges so that any
-// future tables/sequences created by `writer` in `schema` become SELECTable by
-// `reader`. Idempotent.
-func AlterDefaultPrivilegesGrantSelect(ctx context.Context, conn *pgx.Conn, writer, reader, schema string) error {
+// AlterDefaultPrivilegesGrant registers default privileges so that future
+// tables/sequences created by `writer` in `schema` receive the requested access
+// for `reader`. Idempotent.
+func AlterDefaultPrivilegesGrant(ctx context.Context, conn *pgx.Conn, writer, reader, schema string, access AccessLevel) error {
 	if err := ValidateIdentifier(writer); err != nil {
 		return err
 	}
@@ -301,26 +301,28 @@ func AlterDefaultPrivilegesGrantSelect(ctx context.Context, conn *pgx.Conn, writ
 	if err := ValidateIdentifier(schema); err != nil {
 		return err
 	}
+	tablePrivs, sequencePrivs, err := defaultPrivileges(access)
+	if err != nil {
+		return err
+	}
 	stmts := []string{
-		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s GRANT SELECT ON TABLES TO %s",
-			Quote(writer), Quote(schema), Quote(reader)),
-		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s GRANT SELECT ON SEQUENCES TO %s",
-			Quote(writer), Quote(schema), Quote(reader)),
+		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s GRANT %s ON TABLES TO %s",
+			Quote(writer), Quote(schema), tablePrivs, Quote(reader)),
+		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s GRANT %s ON SEQUENCES TO %s",
+			Quote(writer), Quote(schema), sequencePrivs, Quote(reader)),
 	}
 	for _, s := range stmts {
 		if _, err := conn.Exec(ctx, s); err != nil {
-			return fmt.Errorf("alter default privileges (%s, %s, %s) [%s]: %w", writer, schema, reader, s, err)
+			return fmt.Errorf("alter default privileges (%s, %s, %s, %s) [%s]: %w", writer, schema, reader, access, s, err)
 		}
 	}
 	return nil
 }
 
-// AlterDefaultPrivilegesRevokeSelect is the inverse of
-// AlterDefaultPrivilegesGrantSelect: it removes the pg_default_acl entry that
-// would otherwise grant SELECT to `reader` on future tables/sequences created
-// by `writer` in `schema`. Idempotent — Postgres tolerates revokes of grants
-// that don't exist.
-func AlterDefaultPrivilegesRevokeSelect(ctx context.Context, conn *pgx.Conn, writer, reader, schema string) error {
+// AlterDefaultPrivilegesRevoke is the inverse of
+// AlterDefaultPrivilegesGrant. Idempotent — Postgres tolerates revokes of
+// grants that don't exist.
+func AlterDefaultPrivilegesRevoke(ctx context.Context, conn *pgx.Conn, writer, reader, schema string, access AccessLevel) error {
 	if err := ValidateIdentifier(writer); err != nil {
 		return err
 	}
@@ -330,16 +332,43 @@ func AlterDefaultPrivilegesRevokeSelect(ctx context.Context, conn *pgx.Conn, wri
 	if err := ValidateIdentifier(schema); err != nil {
 		return err
 	}
+	tablePrivs, sequencePrivs, err := defaultPrivileges(access)
+	if err != nil {
+		return err
+	}
 	stmts := []string{
-		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s REVOKE SELECT ON TABLES FROM %s",
-			Quote(writer), Quote(schema), Quote(reader)),
-		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s REVOKE SELECT ON SEQUENCES FROM %s",
-			Quote(writer), Quote(schema), Quote(reader)),
+		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s REVOKE %s ON TABLES FROM %s",
+			Quote(writer), Quote(schema), tablePrivs, Quote(reader)),
+		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s REVOKE %s ON SEQUENCES FROM %s",
+			Quote(writer), Quote(schema), sequencePrivs, Quote(reader)),
 	}
 	for _, s := range stmts {
 		if _, err := conn.Exec(ctx, s); err != nil {
-			return fmt.Errorf("revoke default privileges (%s, %s, %s) [%s]: %w", writer, schema, reader, s, err)
+			return fmt.Errorf("revoke default privileges (%s, %s, %s, %s) [%s]: %w", writer, schema, reader, access, s, err)
 		}
 	}
 	return nil
+}
+
+// AlterDefaultPrivilegesGrantSelect is kept for tests and older callers that
+// only need ReadOnly default privileges.
+func AlterDefaultPrivilegesGrantSelect(ctx context.Context, conn *pgx.Conn, writer, reader, schema string) error {
+	return AlterDefaultPrivilegesGrant(ctx, conn, writer, reader, schema, AccessReadOnly)
+}
+
+// AlterDefaultPrivilegesRevokeSelect is kept for tests and older callers that
+// only need ReadOnly default privileges.
+func AlterDefaultPrivilegesRevokeSelect(ctx context.Context, conn *pgx.Conn, writer, reader, schema string) error {
+	return AlterDefaultPrivilegesRevoke(ctx, conn, writer, reader, schema, AccessReadOnly)
+}
+
+func defaultPrivileges(access AccessLevel) (string, string, error) {
+	switch access {
+	case AccessReadOnly:
+		return "SELECT", "SELECT", nil
+	case AccessReadWrite:
+		return "SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES", "USAGE, SELECT, UPDATE", nil
+	default:
+		return "", "", fmt.Errorf("unsupported default privilege access level %q", access)
+	}
 }

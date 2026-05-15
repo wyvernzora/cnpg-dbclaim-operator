@@ -84,6 +84,13 @@ The resulting `Secret` (named `<roleclaim>-credentials`) carries the
 following keys: `host`, `port`, `dbname`, `user`, `password`, `uri` (libpq
 URI), `jdbc_uri`.
 
+Physical Postgres resources have one winning claim per CNPG cluster. If two
+`DatabaseClaim`s target the same `(clusterRef, databaseName)`, or two
+`RoleClaim`s target the same Postgres role name on the same cluster, the
+oldest claim wins. Later duplicates stay `Pending` with
+`Reason=DatabaseNameConflict` or `Reason=RoleNameConflict` and do not touch
+SQL state or credentials.
+
 ## Choosing the right shape
 
 | Situation | Pattern |
@@ -102,11 +109,11 @@ that owns the cluster manifest.
 
 Default privileges are reconciled reflexively: when any RoleClaim becomes
 Ready, the operator walks all sibling RoleClaims that share a schema and
-issues `ALTER DEFAULT PRIVILEGES FOR ROLE <writer> IN SCHEMA <s> GRANT
-SELECT ... TO <reader>` for every (writer, reader) pair. This means future
-objects created by any writer become visible to all readers, on the same
-schema, without explicit configuration — provided migrations are run as a
-writer role.
+issues `ALTER DEFAULT PRIVILEGES` for every writer/reader pair. Future
+objects created by an `Owner` or `ReadWrite` writer are visible to
+`ReadOnly` readers, and writable by `ReadWrite` readers, on the same schema,
+without explicit configuration — provided migrations are run as a writer
+role.
 
 DatabaseClaim deletion is conservative:
 - `deletionPolicy: Retain` (default) blocks deletion while any `RoleClaim`

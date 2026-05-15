@@ -35,7 +35,8 @@ import (
 // DatabaseClaimReconciler reconciles DatabaseClaim resources.
 type DatabaseClaimReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
 }
 
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=databaseclaims,verbs=get;list;watch;create;update;patch;delete
@@ -71,6 +72,20 @@ func (r *DatabaseClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 func (r *DatabaseClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgclaimv1alpha1.DatabaseClaim) (ctrl.Result, error) {
 	claim.Status.Phase = cnpgclaimv1alpha1.DatabaseClaimPhaseProvisioning
+
+	claims, err := r.allDatabaseClaims(ctx)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if conflict := findDatabaseNameConflict(claim, claims); conflict != "" {
+		setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseReady, metav1.ConditionFalse, ReasonDatabaseNameConflict, conflict)
+		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonDatabaseNameConflict, conflict)
+		claim.Status.Phase = cnpgclaimv1alpha1.DatabaseClaimPhasePending
+		if err := r.Status().Update(ctx, claim); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	}
 
 	target, err := cnpgresolver.Resolve(ctx, r.Client, claim.Spec.ClusterRef.Name, claim.Spec.ClusterRef.Namespace)
 	if err != nil {
@@ -193,6 +208,15 @@ func (r *DatabaseClaimReconciler) reconcileDelete(ctx context.Context, claim *cn
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 		// No more referrers — drop the database, then release the finalizer.
+		claims, err := r.allDatabaseClaims(ctx)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if otherDatabaseClaimOwnsPhysicalDatabase(claim, claims) {
+			log.FromContext(ctx).Info("another DatabaseClaim still owns physical database; releasing finalizer without DROP",
+				"database", claim.Spec.DatabaseName, "cluster", claim.Spec.ClusterRef)
+			break
+		}
 		if err := r.dropDatabase(ctx, claim); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -247,6 +271,9 @@ func (r *DatabaseClaimReconciler) dropDatabase(ctx context.Context, claim *cnpgc
 // SetupWithManager wires up the controller. Field indexes must be installed
 // once per manager via SetupFieldIndexes before this is called.
 func (r *DatabaseClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cnpgclaimv1alpha1.DatabaseClaim{}).
 		Watches(
@@ -258,6 +285,13 @@ func (r *DatabaseClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.requestsForRoleClaim),
 		).
 		Complete(r)
+}
+
+func (r *DatabaseClaimReconciler) allDatabaseClaims(ctx context.Context) ([]cnpgclaimv1alpha1.DatabaseClaim, error) {
+	if r.APIReader != nil {
+		return listDatabaseClaims(ctx, r.APIReader)
+	}
+	return listDatabaseClaims(ctx, r.Client)
 }
 
 // requestsForCluster maps a Cluster change into reconciles of all

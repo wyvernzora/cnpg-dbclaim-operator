@@ -154,17 +154,26 @@ spec:
             properties:
               appliedDefaultPrivileges:
                 description: |-
-                  AppliedDefaultPrivileges records the (writer, schema) pairs for which
-                  this RoleClaim's role currently holds default SELECT privileges. The
-                  reconciler diffs against this list each pass: pairs no longer in the
+                  AppliedDefaultPrivileges records the (writer, schema, access) tuples for
+                  which this RoleClaim's role currently holds default privileges. The
+                  reconciler diffs against this list each pass: tuples no longer in the
                   intended universe are revoked via ALTER DEFAULT PRIVILEGES ... REVOKE.
                 items:
                   description: |-
-                    DefaultPrivilegeGrant is one (writer-role, schema) pair on which this
-                    RoleClaim's role has been granted default SELECT privileges via
-                    ALTER DEFAULT PRIVILEGES. Tracked in status so a narrowing reconcile can
-                    revoke the diff.
+                    DefaultPrivilegeGrant is one (writer-role, schema, access) tuple on which
+                    this RoleClaim's role has been granted default privileges via ALTER DEFAULT
+                    PRIVILEGES. Tracked in status so a narrowing reconcile can revoke the diff.
                   properties:
+                    access:
+                      description: |-
+                        Access is the privilege profile applied to future objects. Empty means
+                        ReadOnly for compatibility with status written by older operator
+                        versions.
+                      enum:
+                      - Owner
+                      - ReadWrite
+                      - ReadOnly
+                      type: string
                     schema:
                       description: Schema is the schema scope of the default-privilege
                         grant.
@@ -172,7 +181,7 @@ spec:
                     writer:
                       description: |-
                         Writer is the Postgres role whose future objects this claim's role
-                        receives SELECT on.
+                        receives privileges on.
                       type: string
                   required:
                   - schema

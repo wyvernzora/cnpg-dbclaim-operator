@@ -17,6 +17,7 @@ import (
 	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -215,6 +216,47 @@ var _ = Describe("DatabaseClaim", func() {
 			return cond.Reason
 		}, 20*time.Second, 500*time.Millisecond).Should(Equal(ReasonClusterNotReady))
 	})
+
+	It("marks the newer duplicate physical database claim as conflicted", func() {
+		ctx := context.Background()
+		suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+		clusterRef := cnpgclaimv1alpha1.ClusterReference{Name: "missing-" + suffix, Namespace: ns}
+		older := &cnpgclaimv1alpha1.DatabaseClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "db-owner-a-" + suffix, Namespace: ns},
+			Spec: cnpgclaimv1alpha1.DatabaseClaimSpec{
+				DatabaseName:   "same_db_" + suffix,
+				ClusterRef:     clusterRef,
+				DeletionPolicy: cnpgclaimv1alpha1.DeletionPolicyRetain,
+			},
+		}
+		newer := &cnpgclaimv1alpha1.DatabaseClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "db-owner-b-" + suffix, Namespace: ns},
+			Spec: cnpgclaimv1alpha1.DatabaseClaimSpec{
+				DatabaseName:   older.Spec.DatabaseName,
+				ClusterRef:     clusterRef,
+				DeletionPolicy: cnpgclaimv1alpha1.DeletionPolicyRetain,
+			},
+		}
+		Expect(k8sClient.Create(ctx, older)).To(Succeed())
+		time.Sleep(1100 * time.Millisecond)
+		Expect(k8sClient.Create(ctx, newer)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(context.Background(), older)
+			_ = k8sClient.Delete(context.Background(), newer)
+		})
+
+		Eventually(func() string {
+			var got cnpgclaimv1alpha1.DatabaseClaim
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: newer.Name, Namespace: newer.Namespace}, &got); err != nil {
+				return err.Error()
+			}
+			cond := meta.FindStatusCondition(got.Status.Conditions, ConditionReady)
+			if cond == nil {
+				return ""
+			}
+			return cond.Reason
+		}, 20*time.Second, 500*time.Millisecond).Should(Equal(ReasonDatabaseNameConflict))
+	})
 })
 
 var _ = Describe("RoleClaim", func() {
@@ -328,4 +370,92 @@ var _ = Describe("RoleClaim", func() {
 			return apierrors.IsInvalid(err)
 		}, 10*time.Second, 250*time.Millisecond).Should(BeTrue())
 	})
+
+	It("marks the newer duplicate physical role claim as conflicted before creating a Secret", func() {
+		ctx := context.Background()
+		suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+		clusterRef := cnpgclaimv1alpha1.ClusterReference{Name: "missing-" + suffix, Namespace: ns}
+		dbA := &cnpgclaimv1alpha1.DatabaseClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "role-db-a-" + suffix, Namespace: ns},
+			Spec: cnpgclaimv1alpha1.DatabaseClaimSpec{
+				DatabaseName:   "role_db_a_" + suffix,
+				ClusterRef:     clusterRef,
+				Schemas:        []string{"app"},
+				DeletionPolicy: cnpgclaimv1alpha1.DeletionPolicyRetain,
+			},
+		}
+		dbB := &cnpgclaimv1alpha1.DatabaseClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "role-db-b-" + suffix, Namespace: ns},
+			Spec: cnpgclaimv1alpha1.DatabaseClaimSpec{
+				DatabaseName:   "role_db_b_" + suffix,
+				ClusterRef:     clusterRef,
+				Schemas:        []string{"app"},
+				DeletionPolicy: cnpgclaimv1alpha1.DeletionPolicyRetain,
+			},
+		}
+		Expect(k8sClient.Create(ctx, dbA)).To(Succeed())
+		Expect(k8sClient.Create(ctx, dbB)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(context.Background(), dbA)
+			_ = k8sClient.Delete(context.Background(), dbB)
+		})
+		forceDBClaimReady(ctx, dbA.Name, ns)
+		forceDBClaimReady(ctx, dbB.Name, ns)
+
+		access := cnpgclaimv1alpha1.AccessReadWrite
+		older := &cnpgclaimv1alpha1.RoleClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "role-owner-a-" + suffix, Namespace: ns},
+			Spec: cnpgclaimv1alpha1.RoleClaimSpec{
+				DatabaseClaimRef: cnpgclaimv1alpha1.DatabaseClaimRef{Name: dbA.Name},
+				RoleName:         "same_role_" + suffix,
+				Access:           &access,
+			},
+		}
+		newer := &cnpgclaimv1alpha1.RoleClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "role-owner-b-" + suffix, Namespace: ns},
+			Spec: cnpgclaimv1alpha1.RoleClaimSpec{
+				DatabaseClaimRef: cnpgclaimv1alpha1.DatabaseClaimRef{Name: dbB.Name},
+				RoleName:         older.Spec.RoleName,
+				Access:           &access,
+			},
+		}
+		Expect(k8sClient.Create(ctx, older)).To(Succeed())
+		time.Sleep(1100 * time.Millisecond)
+		Expect(k8sClient.Create(ctx, newer)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(context.Background(), older)
+			_ = k8sClient.Delete(context.Background(), newer)
+		})
+
+		Eventually(func() string {
+			forceDBClaimReady(ctx, dbA.Name, ns)
+			forceDBClaimReady(ctx, dbB.Name, ns)
+			var got cnpgclaimv1alpha1.RoleClaim
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: newer.Name, Namespace: newer.Namespace}, &got); err != nil {
+				return err.Error()
+			}
+			cond := meta.FindStatusCondition(got.Status.Conditions, ConditionRoleReady)
+			if cond == nil {
+				return ""
+			}
+			return cond.Reason
+		}, 20*time.Second, 500*time.Millisecond).Should(Equal(ReasonRoleNameConflict))
+
+		var secret corev1.Secret
+		err := k8sClient.Get(ctx, client.ObjectKey{Name: newer.Name + "-credentials", Namespace: ns}, &secret)
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected no credentials Secret, got %v", err)
+	})
 })
+
+func forceDBClaimReady(ctx context.Context, name, namespace string) {
+	Eventually(func() error {
+		var claim cnpgclaimv1alpha1.DatabaseClaim
+		if err := k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, &claim); err != nil {
+			return err
+		}
+		claim.Status.Phase = cnpgclaimv1alpha1.DatabaseClaimPhaseReady
+		claim.Status.ObservedGeneration = claim.Generation
+		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionTrue, ReasonProvisioned, "")
+		return k8sClient.Status().Update(ctx, &claim)
+	}, 10*time.Second, 250*time.Millisecond).Should(Succeed())
+}

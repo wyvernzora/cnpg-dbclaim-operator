@@ -12,7 +12,9 @@ You may obtain a copy of the License at
 package controller
 
 import (
+	"cmp"
 	"context"
+	"fmt"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -53,6 +55,8 @@ const (
 	ReasonDatabaseNotReady     = "DatabaseNotReady"
 	ReasonUnknownSchema        = "UnknownSchema"
 	ReasonOwnerConflict        = "OwnerConflict"
+	ReasonDatabaseNameConflict = "DatabaseNameConflict"
+	ReasonRoleNameConflict     = "RoleNameConflict"
 	ReasonBlockedByRoleClaims  = "BlockedByRoleClaims"
 )
 
@@ -106,6 +110,94 @@ func setCondition(conds *[]metav1.Condition, generation int64, t string, status 
 		Message:            message,
 		ObservedGeneration: generation,
 	})
+}
+
+// objectWins reports whether a wins deterministic ownership against b:
+// earlier CreationTimestamp first, lower UID on tie. All claim ownership
+// arbitration uses this same rule so conflicts converge predictably.
+func objectWins(a, b client.Object) bool {
+	aCreated := a.GetCreationTimestamp()
+	bCreated := b.GetCreationTimestamp()
+	if aCreated.Before(&bCreated) {
+		return true
+	}
+	if bCreated.Before(&aCreated) {
+		return false
+	}
+	return cmp.Compare(string(a.GetUID()), string(b.GetUID())) < 0
+}
+
+func sameObject(a, b client.Object) bool {
+	if a.GetUID() != "" && b.GetUID() != "" {
+		return a.GetUID() == b.GetUID()
+	}
+	return a.GetNamespace() == b.GetNamespace() && a.GetName() == b.GetName()
+}
+
+func physicalDatabaseKey(dc *cnpgclaimv1alpha1.DatabaseClaim) string {
+	return dc.Spec.ClusterRef.Namespace + "\x00" + dc.Spec.ClusterRef.Name + "\x00" + dc.Spec.DatabaseName
+}
+
+func samePhysicalDatabase(a, b *cnpgclaimv1alpha1.DatabaseClaim) bool {
+	return physicalDatabaseKey(a) == physicalDatabaseKey(b)
+}
+
+// findDatabaseNameConflict returns a message if an older non-deleting
+// DatabaseClaim already owns the same physical (cluster, databaseName).
+func findDatabaseNameConflict(claim *cnpgclaimv1alpha1.DatabaseClaim, claims []cnpgclaimv1alpha1.DatabaseClaim) string {
+	for i := range claims {
+		other := &claims[i]
+		if sameObject(other, claim) {
+			continue
+		}
+		if !other.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if !samePhysicalDatabase(other, claim) {
+			continue
+		}
+		if !objectWins(other, claim) {
+			continue
+		}
+		return fmt.Sprintf("DatabaseClaim %q in namespace %q already owns database %q on Cluster %s/%s",
+			other.Name, other.Namespace, claim.Spec.DatabaseName, claim.Spec.ClusterRef.Namespace, claim.Spec.ClusterRef.Name)
+	}
+	return ""
+}
+
+// otherDatabaseClaimOwnsPhysicalDatabase reports whether a non-deleting claim
+// other than claim still points at the same physical database. Used to avoid
+// dropping shared physical state when deleting stale duplicate claims.
+func otherDatabaseClaimOwnsPhysicalDatabase(claim *cnpgclaimv1alpha1.DatabaseClaim, claims []cnpgclaimv1alpha1.DatabaseClaim) bool {
+	for i := range claims {
+		other := &claims[i]
+		if sameObject(other, claim) {
+			continue
+		}
+		if !other.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if samePhysicalDatabase(other, claim) {
+			return true
+		}
+	}
+	return false
+}
+
+func listDatabaseClaims(ctx context.Context, r client.Reader) ([]cnpgclaimv1alpha1.DatabaseClaim, error) {
+	var list cnpgclaimv1alpha1.DatabaseClaimList
+	if err := r.List(ctx, &list); err != nil {
+		return nil, err
+	}
+	return list.Items, nil
+}
+
+func listRoleClaims(ctx context.Context, r client.Reader) ([]cnpgclaimv1alpha1.RoleClaim, error) {
+	var list cnpgclaimv1alpha1.RoleClaimList
+	if err := r.List(ctx, &list); err != nil {
+		return nil, err
+	}
+	return list.Items, nil
 }
 
 // roleClaimsReferencingDBClaim returns the RoleClaims in the given namespace
