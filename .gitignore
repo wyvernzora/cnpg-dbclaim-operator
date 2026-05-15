@@ -34,4 +34,4 @@ go.work.sum
 # build output
 bin/
 testbin/
-
+test/e2e/_artifacts/

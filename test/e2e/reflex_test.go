@@ -1,0 +1,89 @@
+//go:build e2e
+
+/*
+Copyright 2026 contributors to cnpg-dbclaim-operator.
+*/
+
+package e2e_test
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	cnpgclaimv1alpha1 "github.com/wyvernzora/cnpg-dbclaim-operator/api/v1alpha1"
+)
+
+var _ = Describe("reflex default privileges", Ordered, func() {
+	var (
+		ctx        context.Context
+		ns         string
+		suffix     string
+		dbName     string
+		writerRole string
+		readerRole string
+		reader     *pgx.Conn
+		writer     *pgx.Conn
+	)
+
+	BeforeAll(func() {
+		ctx = context.Background()
+		suffix = randomSuffix()
+		ns = createNamespace(ctx, "reflex")
+		dbName = "e2e_reflex_" + suffix
+		writerRole = "e2e_reflex_writer_" + suffix
+		readerRole = "e2e_reflex_reader_" + suffix
+	})
+
+	It("grants and revokes default SELECT privileges for future writer objects", func() {
+		createDBClaim(ctx, ns, "reflex-db", dbName, cnpgclaimv1alpha1.DeletionPolicyRetain, "s", "other")
+		waitDBReady(ctx, ns, "reflex-db")
+		createExplicitRoleClaim(ctx, ns, "writer", "reflex-db", writerRole,
+			cnpgclaimv1alpha1.SchemaGrant{Name: "s", Access: cnpgclaimv1alpha1.AccessReadWrite},
+		)
+		createExplicitRoleClaim(ctx, ns, "reader", "reflex-db", readerRole,
+			cnpgclaimv1alpha1.SchemaGrant{Name: "s", Access: cnpgclaimv1alpha1.AccessReadOnly},
+			cnpgclaimv1alpha1.SchemaGrant{Name: "other", Access: cnpgclaimv1alpha1.AccessReadOnly},
+		)
+		writerClaim := waitRoleReady(ctx, ns, "writer")
+		readerClaim := waitRoleReady(ctx, ns, "reader")
+
+		writerConn, err := connectAs(ctx, getSecret(ctx, ns, writerClaim.Status.CredentialsSecretName), pgPort)
+		Expect(err).NotTo(HaveOccurred())
+		defer writerConn.Close(ctx)
+		writer = writerConn
+		readerConn, err := connectAs(ctx, getSecret(ctx, ns, readerClaim.Status.CredentialsSecretName), pgPort)
+		Expect(err).NotTo(HaveOccurred())
+		defer readerConn.Close(ctx)
+		reader = readerConn
+
+		expectExec(ctx, writer, fmt.Sprintf("CREATE TABLE %s (id int)", quoteTable("s", "t1")))
+		expectExec(ctx, writer, fmt.Sprintf("INSERT INTO %s (id) VALUES (1)", quoteTable("s", "t1")))
+		expectQueryRow(ctx, reader, fmt.Sprintf("SELECT count(*) FROM %s", quoteTable("s", "t1")))
+
+		super, err := connectSuper(ctx, dbName)
+		Expect(err).NotTo(HaveOccurred())
+		defer super.Close(ctx)
+		Expect(defaultACLReaders(ctx, super, "s", writerRole)).To(ContainElement(readerRole))
+
+		var current cnpgclaimv1alpha1.RoleClaim
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "reader", Namespace: ns}, &current)).To(Succeed())
+		before := current.DeepCopy()
+		current.Spec.Schemas = []cnpgclaimv1alpha1.SchemaGrant{
+			{Name: "other", Access: cnpgclaimv1alpha1.AccessReadOnly},
+		}
+		Expect(k8sClient.Patch(ctx, &current, client.MergeFrom(before))).To(Succeed())
+		waitRoleSchemaAbsent(ctx, ns, "reader", "s")
+		Eventually(func() []string {
+			return defaultACLReaders(ctx, super, "s", writerRole)
+		}, e2eTimeout, e2ePollInterval).ShouldNot(ContainElement(readerRole))
+
+		expectExec(ctx, writer, fmt.Sprintf("CREATE TABLE %s (id int)", quoteTable("s", "t2")))
+		expectExec(ctx, writer, fmt.Sprintf("INSERT INTO %s (id) VALUES (2)", quoteTable("s", "t2")))
+		expectCannotSelect(ctx, reader, "s", "t2")
+	})
+})

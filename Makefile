@@ -1,6 +1,10 @@
 # cnpg-dbclaim-operator Makefile
 
-IMG ?= cnpg-dbclaim-operator:dev
+CNPG_VERSION ?= 1.27.4
+CNPG_MINOR ?= 1.27
+IMAGE_REPOSITORY ?= cnpg-dbclaim-operator
+IMAGE_TAG ?= e2e
+IMG ?= $(IMAGE_REPOSITORY):$(IMAGE_TAG)
 GO ?= go
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
@@ -12,7 +16,7 @@ LOCALBIN ?= $(shell pwd)/bin
 CONTROLLER_TOOLS_VERSION ?= v0.16.5
 KUSTOMIZE_VERSION ?= v5.4.3
 ENVTEST_K8S_VERSION ?= 1.31.0
-GOLANGCI_LINT_VERSION ?= v1.61.0
+GOLANGCI_LINT_VERSION ?= v1.64.8
 
 .PHONY: all
 all: build
@@ -72,6 +76,58 @@ docker-build: ## Build the operator container image.
 .PHONY: docker-push
 docker-push: ## Push the operator container image.
 	docker push $(IMG)
+
+##@ End-to-end
+
+.PHONY: verify-cnpg-version
+verify-cnpg-version: ## Verify Makefile CNPG_VERSION matches go.mod.
+	@grep -q "github.com/cloudnative-pg/cloudnative-pg v$(CNPG_VERSION)" go.mod || \
+	  { echo "go.mod CNPG version != Makefile CNPG_VERSION ($(CNPG_VERSION))"; exit 1; }
+
+.PHONY: kind-up
+kind-up: ## Create the local kind cluster used by e2e.
+	kind create cluster --config hack/e2e/kind-config.yaml --name dbclaim-e2e
+
+.PHONY: kind-down
+kind-down: ## Delete the local kind cluster used by e2e.
+	kind delete cluster --name dbclaim-e2e
+
+.PHONY: kind-load
+kind-load: ## Load the operator image into the e2e kind cluster.
+	kind load docker-image $(IMG) --name dbclaim-e2e
+
+.PHONY: cnpg-install
+cnpg-install: ## Install the pinned CloudNativePG operator into the current cluster.
+	kubectl apply --server-side -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-$(CNPG_MINOR)/releases/cnpg-$(CNPG_VERSION).yaml
+	kubectl -n cnpg-system rollout status deployment/cnpg-controller-manager --timeout=300s
+
+.PHONY: cluster-up
+cluster-up: ## Create the shared e2e Postgres Cluster.
+	kubectl apply -f hack/e2e/test-cluster.yaml
+	kubectl -n cnpg-system wait --for=condition=Ready clusters.postgresql.cnpg.io/shared-pg --timeout=300s
+
+.PHONY: operator-install
+operator-install: ## Install the operator chart into the current cluster.
+	helm upgrade --install dbclaim charts/dbclaim-operator \
+	  --namespace cnpg-dbclaim-system --create-namespace \
+	  --set image.repository=$(IMAGE_REPOSITORY) \
+	  --set image.tag=$(IMAGE_TAG) \
+	  --set image.pullPolicy=Never \
+	  --set installCRDs=true \
+	  --set leaderElection=false
+	kubectl -n cnpg-dbclaim-system rollout status deployment/dbclaim-dbclaim-operator --timeout=180s
+
+.PHONY: e2e
+e2e: ## Run the kind/CNPG end-to-end suite against the current cluster.
+	$(GO) test -tags=e2e -count=1 -v -timeout 15m ./test/e2e/...
+
+.PHONY: e2e-local
+e2e-local: kind-up docker-build kind-load cnpg-install cluster-up operator-install e2e ## Bring up kind and run e2e, leaving the cluster for debugging.
+
+.PHONY: e2e-local-clean
+e2e-local-clean: ## Bring up kind, run e2e, and always delete the cluster.
+	trap 'kind delete cluster --name dbclaim-e2e' EXIT; \
+	  $(MAKE) e2e-local
 
 ##@ Tooling
 

@@ -41,7 +41,7 @@ import (
 )
 
 // roleClaimSecretLabel marks Secrets owned by a RoleClaim with the claim name.
-const roleClaimSecretLabel = "cnpg.wyvernzora.io/roleclaim"
+const roleClaimSecretLabel = "cnpg.wyvernzora.io/roleclaim" // #nosec G101 -- Kubernetes label key, not a credential.
 
 // RoleClaimReconciler reconciles RoleClaim resources.
 type RoleClaimReconciler struct {
