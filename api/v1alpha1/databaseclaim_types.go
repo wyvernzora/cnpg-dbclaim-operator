@@ -158,7 +158,3 @@ type DatabaseClaimList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DatabaseClaim `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&DatabaseClaim{}, &DatabaseClaimList{})
-}
