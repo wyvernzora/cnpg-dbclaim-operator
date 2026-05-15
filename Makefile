@@ -163,7 +163,9 @@ envtest: $(LOCALBIN)
 
 .PHONY: golangci-lint
 golangci-lint: $(LOCALBIN)
-	@test -x $(GOLANGCI_LINT) || GOBIN=$(LOCALBIN) $(GO) install $(GOLANGCI_LINT_MODULE)@$(GOLANGCI_LINT_VERSION)
+	@if ! test -x $(GOLANGCI_LINT) || ! $(GOLANGCI_LINT) version | grep -q "version $(GOLANGCI_LINT_VERSION)"; then \
+		GOBIN=$(LOCALBIN) $(GO) install $(GOLANGCI_LINT_MODULE)@$(GOLANGCI_LINT_VERSION); \
+	fi
 
 $(LOCALBIN):
 	@mkdir -p $(LOCALBIN)
