@@ -10,7 +10,123 @@ permissions:
   contents: read
 
 jobs:
+  skipped-untrusted-pr:
+    if: >-
+      github.event_name == 'pull_request' &&
+      (github.event.pull_request.user.login != 'renovate[bot]' ||
+       github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "CI is not automatically run for non-Renovate pull requests."
+
+  generated:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.user.login == 'renovate[bot]' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make manifests generate
+      - name: Verify generated files are committed
+        run: |
+          paths=(
+            api/v1alpha1/zz_generated.deepcopy.go
+            config/crd/bases
+            config/rbac
+            charts/dbclaim-operator/templates/crds
+          )
+          if ! git diff --quiet -- "${paths[@]}"; then
+            echo "::error::Generated API, CRD, or RBAC files are stale. Run 'make manifests generate' and commit the result."
+            git diff -- "${paths[@]}"
+            exit 1
+          fi
+
+  crd-rbac-diff:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.user.login == 'renovate[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Post CRD/RBAC diff comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          paths=(
+            config/crd/bases
+            config/rbac
+            charts/dbclaim-operator/templates/crds
+          )
+          marker="<!-- cnpg-dbclaim-crd-rbac-diff -->"
+          find_comment() {
+            gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+              --jq ".[] | select(.body | contains(\"$marker\")) | .id" |
+              head -n 1
+          }
+
+          if git diff --quiet "$BASE_SHA...HEAD" -- "${paths[@]}"; then
+            comment_id="$(find_comment)"
+            if [ -n "$comment_id" ]; then
+              gh api --method DELETE "repos/$REPO/issues/comments/$comment_id" >/dev/null
+            fi
+            echo "No CRD/RBAC diff against $BASE_REF."
+            exit 0
+          fi
+
+          diff_file="$(mktemp)"
+          git diff --no-color "$BASE_SHA...HEAD" -- "${paths[@]}" > "$diff_file"
+
+          max_bytes=60000
+          truncated=""
+          if [ "$(wc -c < "$diff_file")" -gt "$max_bytes" ]; then
+            head -c "$max_bytes" "$diff_file" > "$diff_file.truncated"
+            mv "$diff_file.truncated" "$diff_file"
+            truncated=$'\n\n... diff truncated ...'
+          fi
+
+          body_file="$(mktemp)"
+          {
+            printf '%s\n' "$marker"
+            printf '### CRD/RBAC diff against `%s`\n\n' "$BASE_REF"
+            printf '<details open>\n'
+            printf '<summary>Generated manifest changes</summary>\n\n'
+            printf '```diff\n'
+            cat "$diff_file"
+            printf '%s\n' "$truncated"
+            printf '```\n'
+            printf '</details>\n'
+          } > "$body_file"
+
+          comment_id="$(find_comment)"
+          body="$(cat "$body_file")"
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$comment_id" -f body="$body" >/dev/null
+          else
+            gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
+          fi
+
   lint:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.user.login == 'renovate[bot]' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +139,10 @@ jobs:
       - run: make lint
 
   unit:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.user.login == 'renovate[bot]' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +153,10 @@ jobs:
       - run: make test
 
   chart:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.user.login == 'renovate[bot]' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +165,10 @@ jobs:
       - run: make chart-template
 
   e2e:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.user.login == 'renovate[bot]' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
