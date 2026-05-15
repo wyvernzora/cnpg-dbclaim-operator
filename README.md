@@ -117,19 +117,32 @@ DatabaseClaim deletion is conservative:
 
 ## Installation
 
+Install CloudNativePG before installing this operator. The operator expects a
+ready CNPG `Cluster` and uses the cluster-generated superuser credentials to
+provision databases and roles.
+
 ### Helm
 
 ```bash
-helm install dbclaim-operator charts/dbclaim-operator \
-  --namespace cnpg-system \
-  --create-namespace \
-  --set image.repository=ghcr.io/wyvernzora/cnpg-dbclaim-operator \
-  --set image.tag=v0.1.0
+helm install dbclaim-operator \
+  oci://ghcr.io/wyvernzora/charts/dbclaim-operator \
+  --version 0.1.0 \
+  --namespace cnpg-dbclaim-system \
+  --create-namespace
 ```
 
 CRDs are installed by the chart (templates/crds/) with
 `helm.sh/resource-policy: keep` so they survive an uninstall. Pass
 `--set installCRDs=false` to skip if you manage CRDs out of band.
+
+To install from a local checkout instead:
+
+```bash
+helm install dbclaim-operator charts/dbclaim-operator \
+  --namespace cnpg-dbclaim-system \
+  --create-namespace \
+  --values charts/dbclaim-operator/values.example.yaml
+```
 
 ### Kustomize
 
@@ -148,12 +161,63 @@ See `config/samples/`:
 - `scenario_b_bounded_context.yaml` — bounded-context shared DB
 - `scenario_c_independent_apps.yaml` — separate DBs on one cluster
 
+After applying claims, verify readiness through status conditions:
+
+```bash
+kubectl get databaseclaims,roleclaims -A
+kubectl describe databaseclaim -n app-team-a orders
+kubectl describe roleclaim -n app-team-a orders-rw
+kubectl get secret -n app-team-a orders-rw-credentials -o yaml
+```
+
+## Operations
+
+### Troubleshooting
+
+- Check `DatabaseClaim.status.conditions` for CNPG cluster resolution and
+  database provisioning errors.
+- Check `RoleClaim.status.conditions` for parent `DatabaseClaim`, schema,
+  owner-conflict, SQL grant, and Secret errors.
+- Check operator logs:
+
+  ```bash
+  kubectl logs -n cnpg-dbclaim-system \
+    -l app.kubernetes.io/name=dbclaim-operator
+  ```
+
+- Verify the referenced CNPG `Cluster` is Ready and that its read-write
+  service and superuser Secret exist.
+- Verify generated credentials in the `<roleclaim>-credentials` Secret.
+
+### Uninstall
+
+For `deletionPolicy: Retain`, delete dependent `RoleClaim`s before deleting
+their `DatabaseClaim`; the operator blocks deletion while roles still refer
+to the retained database. For `deletionPolicy: Delete`, deleting the
+`DatabaseClaim` cascades through referring `RoleClaim`s and drops the
+Postgres database.
+
+Wait for finalizers to clear before removing the operator or CRDs:
+
+```bash
+kubectl get databaseclaims,roleclaims -A
+```
+
+The Helm chart keeps CRDs on uninstall. Remove them manually only after all
+`DatabaseClaim` and `RoleClaim` objects are gone:
+
+```bash
+helm uninstall dbclaim-operator -n cnpg-dbclaim-system
+kubectl delete crd databaseclaims.cnpg.wyvernzora.io roleclaims.cnpg.wyvernzora.io
+```
+
 ## Development
 
 ```bash
 make manifests   # regenerate CRDs/RBAC (also syncs into Helm chart)
 make build       # compile manager binary into bin/
 make test        # unit + envtest-based integration tests
+make chart-lint  # lint the Helm chart
 make docker-build IMG=cnpg-dbclaim-operator:dev
 ```
 

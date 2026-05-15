@@ -1,0 +1,71 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/wyvernzora/cnpg-dbclaim-operator
+  CHART_REPOSITORY: oci://ghcr.io/wyvernzora/charts
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: azure/setup-helm@v4
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME}"
+          fi
+          case "$version" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "version must look like v0.1.0, got $version" >&2; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "chart_version=${version#v}" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+      - name: Lint chart
+        run: make chart-lint
+      - name: Render chart
+        run: make chart-template
+      - name: Package chart
+        run: |
+          helm package charts/dbclaim-operator \
+            --version "${{ steps.version.outputs.chart_version }}" \
+            --app-version "${{ steps.version.outputs.version }}" \
+            --destination dist
+      - name: Push chart
+        run: helm push "dist/dbclaim-operator-${{ steps.version.outputs.chart_version }}.tgz" "${CHART_REPOSITORY}"

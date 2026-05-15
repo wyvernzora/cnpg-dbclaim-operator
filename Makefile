@@ -11,6 +11,7 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
+HELM ?= helm
 
 LOCALBIN ?= $(shell pwd)/bin
 
@@ -77,6 +78,17 @@ docker-build: ## Build the operator container image.
 .PHONY: docker-push
 docker-push: ## Push the operator container image.
 	docker push $(IMG)
+
+##@ Packaging
+
+.PHONY: chart-lint
+chart-lint: ## Lint the Helm chart.
+	$(HELM) lint charts/dbclaim-operator
+
+.PHONY: chart-template
+chart-template: ## Render the Helm chart to verify template/YAML syntax.
+	$(HELM) template dbclaim charts/dbclaim-operator --namespace cnpg-dbclaim-system >/dev/null
+	$(HELM) template dbclaim charts/dbclaim-operator --namespace cnpg-dbclaim-system --values charts/dbclaim-operator/values.example.yaml >/dev/null
 
 ##@ End-to-end
 
