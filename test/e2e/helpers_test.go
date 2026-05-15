@@ -31,6 +31,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -194,6 +195,19 @@ func createDBClaim(ctx context.Context, ns, name, dbName string, deletion cnpgcl
 	Expect(k8sClient.Create(ctx, claim)).To(Succeed())
 }
 
+func createDBClaimForCluster(ctx context.Context, ns, name, dbName, cluster, clusterNS string, deletion cnpgclaimv1alpha1.DeletionPolicy, schemas ...string) {
+	claim := &cnpgclaimv1alpha1.DatabaseClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: cnpgclaimv1alpha1.DatabaseClaimSpec{
+			DatabaseName:   dbName,
+			ClusterRef:     cnpgclaimv1alpha1.ClusterReference{Name: cluster, Namespace: clusterNS},
+			Schemas:        schemas,
+			DeletionPolicy: deletion,
+		},
+	}
+	Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+}
+
 func createRoleClaim(ctx context.Context, ns, name, dbClaim, roleName string, access cnpgclaimv1alpha1.AccessLevel) {
 	a := access
 	claim := &cnpgclaimv1alpha1.RoleClaim{
@@ -224,6 +238,29 @@ func waitDBReady(ctx context.Context, ns, name string) cnpgclaimv1alpha1.Databas
 	Eventually(func(g Gomega) {
 		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, &got)).To(Succeed())
 		g.Expect(got.Status.Phase).To(Equal(cnpgclaimv1alpha1.DatabaseClaimPhaseReady))
+	}, e2eTimeout, e2ePollInterval).Should(Succeed())
+	return got
+}
+
+func waitDBReadyReason(ctx context.Context, ns, name, reason string) cnpgclaimv1alpha1.DatabaseClaim {
+	var got cnpgclaimv1alpha1.DatabaseClaim
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, &got)).To(Succeed())
+		cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+		g.Expect(cond).NotTo(BeNil())
+		g.Expect(cond.Reason).To(Equal(reason))
+	}, e2eTimeout, e2ePollInterval).Should(Succeed())
+	return got
+}
+
+func waitDBDeletingReason(ctx context.Context, ns, name, reason string) cnpgclaimv1alpha1.DatabaseClaim {
+	var got cnpgclaimv1alpha1.DatabaseClaim
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, &got)).To(Succeed())
+		g.Expect(got.DeletionTimestamp.IsZero()).To(BeFalse())
+		cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+		g.Expect(cond).NotTo(BeNil())
+		g.Expect(cond.Reason).To(Equal(reason))
 	}, e2eTimeout, e2ePollInterval).Should(Succeed())
 	return got
 }
@@ -360,6 +397,22 @@ func loadAndPatchSamples(path string, mutate func(*unstructured.Unstructured)) (
 	return out, nil
 }
 
+func applyPatchedSample(ctx context.Context, path, ns, suffix string, dbNames map[string]string) []*unstructured.Unstructured {
+	objects, err := loadAndPatchSamples(path, func(obj *unstructured.Unstructured) {
+		dbName := dbNames[obj.GetName()]
+		if dbName == "" && obj.GetKind() == "RoleClaim" {
+			ref, _, _ := unstructured.NestedString(obj.Object, "spec", "databaseClaimRef", "name")
+			dbName = dbNames[ref]
+		}
+		patchSampleObject(obj, ns, suffix, dbName)
+	})
+	Expect(err).NotTo(HaveOccurred())
+	for _, obj := range objects {
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed(), "create %s/%s", obj.GetKind(), obj.GetName())
+	}
+	return objects
+}
+
 func patchSampleObject(obj *unstructured.Unstructured, ns, suffix, dbName string) {
 	obj.SetNamespace(ns)
 	switch obj.GroupVersionKind().GroupKind() {
@@ -367,15 +420,40 @@ func patchSampleObject(obj *unstructured.Unstructured, ns, suffix, dbName string
 		_, _, _ = unstructured.NestedMap(obj.Object, "spec", "clusterRef")
 		_ = unstructured.SetNestedField(obj.Object, cnpgNamespace, "spec", "clusterRef", "namespace")
 		_ = unstructured.SetNestedField(obj.Object, clusterName, "spec", "clusterRef", "name")
-		_ = unstructured.SetNestedField(obj.Object, dbName, "spec", "databaseName")
+		if dbName != "" {
+			_ = unstructured.SetNestedField(obj.Object, dbName, "spec", "databaseName")
+		}
 	case schema.GroupKind{Group: "cnpg.wyvernzora.io", Kind: "RoleClaim"}:
 		roleName := strings.ReplaceAll(obj.GetName(), "-", "_") + "_" + suffix
 		_ = unstructured.SetNestedField(obj.Object, roleName, "spec", "roleName")
 	}
 }
 
+func createNotReadyCNPGCluster(ctx context.Context, name string) {
+	cluster := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "postgresql.cnpg.io/v1",
+			"kind":       "Cluster",
+			"metadata": map[string]any{
+				"name":      name,
+				"namespace": cnpgNamespace,
+			},
+			"spec": map[string]any{
+				"instances": int64(1),
+				"storage": map[string]any{
+					"size": "1Gi",
+				},
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+	DeferCleanup(func(ctx SpecContext) {
+		_ = k8sClient.Delete(ctx, cluster)
+	}, NodeTimeout(70*time.Second))
+}
+
 func dumpState(ctx context.Context) {
-	artifactDir := filepath.Join("test", "e2e", "_artifacts", time.Now().Format("20060102-150405"))
+	artifactDir := filepath.Join("_artifacts", time.Now().Format("20060102-150405"))
 	_ = os.MkdirAll(artifactDir, 0o755)
 	runAndWrite := func(name string, args ...string) {
 		cmd := exec.CommandContext(ctx, name, args...)
