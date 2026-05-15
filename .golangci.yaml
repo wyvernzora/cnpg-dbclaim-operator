@@ -1,38 +1,54 @@
+version: "2"
 run:
-  timeout: 5m
   go: "1.25"
-
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
     - gocritic
-    - gofmt
-    - goimports
     - gosec
     - govet
     - ineffassign
     - misspell
     - staticcheck
-    - typecheck
     - unparam
     - unused
-
-linters-settings:
-  gosec:
-    excludes:
-      - G115  # integer overflow conversions: we use int32 deliberately for k8s API
-      - G404  # math/rand for non-crypto purposes — we use crypto/rand for passwords
-  gocritic:
-    disabled-checks:
-      - ifElseChain
-      - singleCaseSwitch
-  goimports:
-    local-prefixes: github.com/wyvernzora/cnpg-dbclaim-operator
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - gosec
-        - unparam
+  settings:
+    gocritic:
+      disabled-checks:
+        - ifElseChain
+        - singleCaseSwitch
+    gosec:
+      excludes:
+        - G115
+        - G404
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - gosec
+          - unparam
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/wyvernzora/cnpg-dbclaim-operator
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
