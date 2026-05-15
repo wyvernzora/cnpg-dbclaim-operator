@@ -207,7 +207,3 @@ type RoleClaimList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []RoleClaim `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&RoleClaim{}, &RoleClaimList{})
-}
