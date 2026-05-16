@@ -1,0 +1,72 @@
+# Example Argo CD health customizations for cnpg-dbclaim-operator claims.
+#
+# Argo CD's Sync status only answers "does the live Kubernetes object match
+# Git?" These Lua health checks teach Argo CD to read the operator's Ready
+# conditions so GitOps dashboards can distinguish healthy, progressing, and
+# degraded DatabaseClaims/RoleClaims.
+#
+# Merge these data keys into the argocd-cm ConfigMap for your Argo CD
+# installation. If you manage Argo CD through the argocd-operator, translate the
+# same Lua snippets into the operator's resourceCustomizations field instead.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+data:
+  resource.customizations.health.cnpg.wyvernzora.io_DatabaseClaim: |
+    hs = { status = "Progressing", message = "Waiting for DatabaseClaim status" }
+
+    if obj.status ~= nil and obj.status.conditions ~= nil then
+      for _, condition in ipairs(obj.status.conditions) do
+        if condition.type == "Ready" then
+          hs.message = condition.message or condition.reason or ""
+
+          if condition.status == "True" then
+            hs.status = "Healthy"
+            return hs
+          end
+
+          if condition.status == "False" then
+            if condition.reason == "ClusterNotReady" or
+               condition.reason == "Reconciling" then
+              hs.status = "Progressing"
+            else
+              hs.status = "Degraded"
+            end
+            return hs
+          end
+        end
+      end
+    end
+
+    return hs
+
+  resource.customizations.health.cnpg.wyvernzora.io_RoleClaim: |
+    hs = { status = "Progressing", message = "Waiting for RoleClaim status" }
+
+    if obj.status ~= nil and obj.status.conditions ~= nil then
+      for _, condition in ipairs(obj.status.conditions) do
+        if condition.type == "Ready" then
+          hs.message = condition.message or condition.reason or ""
+
+          if condition.status == "True" then
+            hs.status = "Healthy"
+            return hs
+          end
+
+          if condition.status == "False" then
+            if condition.reason == "DatabaseNotReady" or
+               condition.reason == "ClusterNotReady" or
+               condition.reason == "Reconciling" then
+              hs.status = "Progressing"
+            else
+              hs.status = "Degraded"
+            end
+            return hs
+          end
+        end
+      end
+    end
+
+    return hs

@@ -179,6 +179,14 @@ kubectl get secret -n app-team-a orders-rw-credentials -o yaml
 
 ## Operations
 
+### Argo CD health checks
+
+Argo CD's `Synced` status only means the live Kubernetes object matches Git; it
+does not know whether this operator reconciled external Postgres state. See
+[config/samples/argocd-health-customizations.yaml](config/samples/argocd-health-customizations.yaml)
+for an `argocd-cm` customization that maps claim `Ready` conditions to Argo CD
+health.
+
 ### Troubleshooting
 
 - Check `DatabaseClaim.status.conditions` for CNPG cluster resolution and

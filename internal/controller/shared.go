@@ -47,19 +47,20 @@ const (
 
 // Standard reasons.
 const (
-	ReasonProvisioned          = "Provisioned"
-	ReasonReconciling          = "Reconciling"
-	ReasonReconcileFailed      = "ReconcileFailed"
-	ReasonResolveFailed        = "ResolveFailed"
-	ReasonClusterMissing       = "ClusterMissing"
-	ReasonClusterNotReady      = "ClusterNotReady"
-	ReasonDatabaseClaimMissing = "DatabaseClaimMissing"
-	ReasonDatabaseNotReady     = "DatabaseNotReady"
-	ReasonUnknownSchema        = "UnknownSchema"
-	ReasonOwnerConflict        = "OwnerConflict"
-	ReasonDatabaseNameConflict = "DatabaseNameConflict"
-	ReasonRoleNameConflict     = "RoleNameConflict"
-	ReasonBlockedByRoleClaims  = "BlockedByRoleClaims"
+	ReasonProvisioned            = "Provisioned"
+	ReasonReconciling            = "Reconciling"
+	ReasonReconcileFailed        = "ReconcileFailed"
+	ReasonResolveFailed          = "ResolveFailed"
+	ReasonClusterMissing         = "ClusterMissing"
+	ReasonClusterNotReady        = "ClusterNotReady"
+	ReasonSuperuserSecretMissing = "SuperuserSecretMissing"
+	ReasonDatabaseClaimMissing   = "DatabaseClaimMissing"
+	ReasonDatabaseNotReady       = "DatabaseNotReady"
+	ReasonUnknownSchema          = "UnknownSchema"
+	ReasonOwnerConflict          = "OwnerConflict"
+	ReasonDatabaseNameConflict   = "DatabaseNameConflict"
+	ReasonRoleNameConflict       = "RoleNameConflict"
+	ReasonBlockedByRoleClaims    = "BlockedByRoleClaims"
 )
 
 // Event-only reasons for lifecycle paths that do not map cleanly to status

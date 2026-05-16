@@ -734,6 +734,8 @@ func resolveErrorReason(err error) string {
 		return ReasonClusterMissing
 	case errors.Is(err, cnpgresolver.ErrClusterNotReady):
 		return ReasonClusterNotReady
+	case errors.Is(err, cnpgresolver.ErrSuperUserSecretMissing):
+		return ReasonSuperuserSecretMissing
 	default:
 		return ReasonResolveFailed
 	}

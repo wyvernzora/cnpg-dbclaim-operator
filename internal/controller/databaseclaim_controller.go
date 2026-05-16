@@ -136,15 +136,7 @@ func (r *DatabaseClaimReconciler) reconcileNormal(ctx context.Context, claim *cn
 }
 
 func (r *DatabaseClaimReconciler) handleResolveError(ctx context.Context, claim *cnpgclaimv1alpha1.DatabaseClaim, err error) (ctrl.Result, error) {
-	var reason string
-	switch {
-	case errors.Is(err, cnpgresolver.ErrClusterNotFound):
-		reason = ReasonClusterMissing
-	case errors.Is(err, cnpgresolver.ErrClusterNotReady):
-		reason = ReasonClusterNotReady
-	default:
-		reason = ReasonResolveFailed
-	}
+	reason := resolveErrorReason(err)
 	eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason)
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionClusterResolved, metav1.ConditionFalse, reason, err.Error())
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason, err.Error())

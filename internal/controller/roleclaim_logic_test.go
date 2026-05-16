@@ -577,7 +577,7 @@ func TestResolveErrorReason(t *testing.T) {
 		{
 			name: "superuser secret failure",
 			err:  cnpgresolver.ErrSuperUserSecretMissing,
-			want: ReasonResolveFailed,
+			want: ReasonSuperuserSecretMissing,
 		},
 		{
 			name: "generic resolve failure",
