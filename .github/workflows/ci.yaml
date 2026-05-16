@@ -2,28 +2,68 @@ name: ci
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
   push:
     branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
+  statuses: read
 
 jobs:
-  skipped-untrusted-pr:
-    if: >-
-      github.event_name == 'pull_request' &&
-      (github.event.pull_request.user.login != 'renovate[bot]' ||
-       github.event.pull_request.head.repo.full_name != github.repository)
+  trust-gate:
     runs-on: ubuntu-latest
+    outputs:
+      trusted: ${{ steps.gate.outputs.trusted }}
     steps:
-      - run: echo "CI is not automatically run for non-Renovate pull requests."
+      - id: gate
+        env:
+          AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          REPOSITORY: ${{ github.repository }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "trusted=true" >> "$GITHUB_OUTPUT"
+            echo "Trusted because this is a $EVENT_NAME event."
+            exit 0
+          fi
+
+          trusted=false
+          reason="PR author, triggering actor, and current head approval status are not trusted"
+          triggering_actor_permission="$(gh api "repos/$REPOSITORY/collaborators/$TRIGGERING_ACTOR/permission" --jq .permission 2>/dev/null || echo none)"
+          ok_to_test_status="$(gh api "repos/$REPOSITORY/commits/$PR_HEAD_SHA/status" --jq 'any(.statuses[]; .context == "ok-to-test" and .state == "success")' 2>/dev/null || echo false)"
+
+          if [ "$PR_AUTHOR" = "renovate[bot]" ] && [ "$HEAD_REPO" = "$REPOSITORY" ]; then
+            trusted=true
+            reason="Renovate same-repository PR"
+          elif [ "$AUTHOR_ASSOCIATION" = "OWNER" ] || [ "$AUTHOR_ASSOCIATION" = "MEMBER" ] || [ "$AUTHOR_ASSOCIATION" = "COLLABORATOR" ]; then
+            trusted=true
+            reason="PR author association is $AUTHOR_ASSOCIATION"
+          elif [ "$triggering_actor_permission" = "admin" ] || [ "$triggering_actor_permission" = "maintain" ] || [ "$triggering_actor_permission" = "write" ]; then
+            trusted=true
+            reason="Workflow was triggered by $TRIGGERING_ACTOR ($triggering_actor_permission)"
+          elif [ "$ok_to_test_status" = "true" ]; then
+            trusted=true
+            reason="Current PR head has ok-to-test approval status"
+          fi
+
+          echo "trusted=$trusted" >> "$GITHUB_OUTPUT"
+          echo "$reason"
+
+          if [ "$trusted" != "true" ]; then
+            echo "::error::Untrusted PR. A maintainer must re-run the workflow or add ok-to-test for this head commit."
+            exit 1
+          fi
 
   generated:
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.user.login == 'renovate[bot]' &&
-       github.event.pull_request.head.repo.full_name == github.repository)
+    needs: trust-gate
+    if: needs.trust-gate.outputs.trusted == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -47,10 +87,8 @@ jobs:
           fi
 
   crd-rbac-diff:
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.user.login == 'renovate[bot]' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+    needs: trust-gate
+    if: github.event_name == 'pull_request' && needs.trust-gate.outputs.trusted == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -130,10 +168,8 @@ jobs:
           fi
 
   lint:
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.user.login == 'renovate[bot]' &&
-       github.event.pull_request.head.repo.full_name == github.repository)
+    needs: trust-gate
+    if: needs.trust-gate.outputs.trusted == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -146,10 +182,8 @@ jobs:
       - run: make lint
 
   unit:
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.user.login == 'renovate[bot]' &&
-       github.event.pull_request.head.repo.full_name == github.repository)
+    needs: trust-gate
+    if: needs.trust-gate.outputs.trusted == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -160,10 +194,8 @@ jobs:
       - run: make test
 
   chart:
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.user.login == 'renovate[bot]' &&
-       github.event.pull_request.head.repo.full_name == github.repository)
+    needs: trust-gate
+    if: needs.trust-gate.outputs.trusted == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -172,10 +204,8 @@ jobs:
       - run: make chart-template
 
   e2e:
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.user.login == 'renovate[bot]' &&
-       github.event.pull_request.head.repo.full_name == github.repository)
+    needs: trust-gate
+    if: needs.trust-gate.outputs.trusted == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
