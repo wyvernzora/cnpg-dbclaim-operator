@@ -38,6 +38,10 @@ The explicit `GOCACHE` is needed in the Codex sandbox because the default Go
 cache under `~/Library/Caches/go-build` may not be writable. It only changes
 where compiled package cache files are stored.
 
+The e2e targets pass `E2E_GINKGO_ARGS` by default so long waits emit Ginkgo
+progress reports. Override it, for example `E2E_GINKGO_ARGS=-ginkgo.v`, when a
+quieter local run is useful.
+
 `make test` uses envtest and may need permission to bind local loopback ports.
 `make e2e-local-clean` creates a kind cluster named `dbclaim-e2e`, builds and
 loads the operator image, installs CNPG, runs the e2e suite, and deletes the
