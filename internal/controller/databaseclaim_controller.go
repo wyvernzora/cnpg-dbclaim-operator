@@ -95,8 +95,17 @@ func (r *DatabaseClaimReconciler) reconcileNormal(ctx context.Context, claim *cn
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
-	target, err := cnpgresolver.Resolve(ctx, r.Client, claim.Spec.ClusterRef.Name, claim.Spec.ClusterRef.Namespace)
+	target, err := cnpgresolver.ResolveCluster(ctx, r.Client, claim.Spec.ClusterRef.Name, claim.Spec.ClusterRef.Namespace)
 	if err != nil {
+		return r.handleResolveError(ctx, claim, err)
+	}
+	if err := cnpgresolver.CheckClaimAllowed(target, claim.Namespace); err != nil {
+		return r.handleResolveError(ctx, claim, err)
+	}
+	if err := cnpgresolver.CheckClusterReady(target); err != nil {
+		return r.handleResolveError(ctx, claim, err)
+	}
+	if err := cnpgresolver.ResolveSuperuserCredentials(ctx, r.Client, target); err != nil {
 		return r.handleResolveError(ctx, claim, err)
 	}
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionClusterResolved, metav1.ConditionTrue, ReasonProvisioned, "cluster resolved")

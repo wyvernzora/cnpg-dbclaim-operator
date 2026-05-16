@@ -1,0 +1,19 @@
+# Cluster-side opt-in for cross-namespace claims.
+#
+# Without the cnpg.wyvernzora.io/allowed-claim-namespaces annotation, only
+# DatabaseClaims in the same namespace as the Cluster (cnpg-system here) can
+# target it. Claims from app-team-a or app-team-b would park in Pending with
+# Reason=ClaimNotAllowed. Adding the annotation grants those namespaces
+# access; same-namespace claims remain allowed regardless of the list.
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: shared-pg
+  namespace: cnpg-system
+  annotations:
+    cnpg.wyvernzora.io/allowed-claim-namespaces: app-team-a,app-team-b
+spec:
+  instances: 3
+  storage:
+    size: 10Gi

@@ -61,6 +61,7 @@ const (
 	ReasonDatabaseNameConflict   = "DatabaseNameConflict"
 	ReasonRoleNameConflict       = "RoleNameConflict"
 	ReasonBlockedByRoleClaims    = "BlockedByRoleClaims"
+	ReasonClaimNotAllowed        = "ClaimNotAllowed"
 )
 
 // Event-only reasons for lifecycle paths that do not map cleanly to status
