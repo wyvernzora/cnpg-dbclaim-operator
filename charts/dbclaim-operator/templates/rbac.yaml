@@ -6,8 +6,11 @@ metadata:
     {{- include "dbclaim-operator.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["cnpg.wyvernzora.io"]
-    resources: [databaseclaims, roleclaims]
-    verbs: [get, list, watch, create, update, patch, delete]
+    resources: [databaseclaims]
+    verbs: [get, list, watch, update]
+  - apiGroups: ["cnpg.wyvernzora.io"]
+    resources: [roleclaims]
+    verbs: [get, list, watch, update, delete]
   - apiGroups: ["cnpg.wyvernzora.io"]
     resources: [databaseclaims/status, roleclaims/status]
     verbs: [get, update, patch]

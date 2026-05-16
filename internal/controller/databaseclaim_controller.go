@@ -39,10 +39,10 @@ type DatabaseClaimReconciler struct {
 	Scheme    *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=databaseclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=databaseclaims,verbs=get;list;watch;update
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=databaseclaims/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=databaseclaims/finalizers,verbs=update
-// +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=roleclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=roleclaims,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
@@ -62,7 +62,7 @@ func (r *DatabaseClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	if !controllerutil.ContainsFinalizer(&claim, DatabaseClaimFinalizer) {
 		controllerutil.AddFinalizer(&claim, DatabaseClaimFinalizer)
-		if err := r.Update(ctx, &claim); err != nil {
+		if err := updateFinalizers(ctx, r.Client, &claim); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -238,7 +238,7 @@ func (r *DatabaseClaimReconciler) reconcileDelete(ctx context.Context, claim *cn
 	}
 
 	controllerutil.RemoveFinalizer(claim, DatabaseClaimFinalizer)
-	if err := r.Update(ctx, claim); err != nil {
+	if err := updateFinalizers(ctx, r.Client, claim); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil

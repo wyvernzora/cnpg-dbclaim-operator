@@ -66,6 +66,17 @@ const (
 // long enough to ride out a brief cluster outage.
 const clusterGoneGracePeriod = 5 * time.Minute
 
+// updateFinalizers persists metadata.finalizers changes.
+//
+// CRDs do not expose a /finalizers REST subresource. Use a normal object
+// update here; client.SubResource("finalizers").Update targets a non-existent
+// CRD endpoint and returns NotFound in envtest and real clusters. This normal
+// update path requires primary-resource update RBAC in addition to the standard
+// <resource>/finalizers rule emitted by Kubebuilder markers.
+func updateFinalizers(ctx context.Context, c client.Client, obj client.Object) error {
+	return c.Update(ctx, obj)
+}
+
 // Field-index keys used to register and look up cross-resource references via
 // controller-runtime's FieldIndexer, replacing in-process linear scans.
 const (

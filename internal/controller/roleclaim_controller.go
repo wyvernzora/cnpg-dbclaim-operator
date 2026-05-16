@@ -53,7 +53,7 @@ type RoleClaimReconciler struct {
 	Scheme    *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=roleclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=roleclaims,verbs=get;list;watch;update
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=roleclaims/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=roleclaims/finalizers,verbs=update
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=databaseclaims,verbs=get;list;watch
@@ -75,7 +75,7 @@ func (r *RoleClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	if !controllerutil.ContainsFinalizer(&claim, RoleClaimFinalizer) {
 		controllerutil.AddFinalizer(&claim, RoleClaimFinalizer)
-		if err := r.Update(ctx, &claim); err != nil {
+		if err := updateFinalizers(ctx, r.Client, &claim); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -782,7 +782,7 @@ func (r *RoleClaimReconciler) reconcileDelete(ctx context.Context, claim *cnpgcl
 	// If dbClaim is gone or cluster gone past grace, just release the finalizer.
 
 	controllerutil.RemoveFinalizer(claim, RoleClaimFinalizer)
-	if err := r.Update(ctx, claim); err != nil {
+	if err := updateFinalizers(ctx, r.Client, claim); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
