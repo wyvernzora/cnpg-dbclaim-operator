@@ -6,6 +6,7 @@ IMAGE_REPOSITORY ?= cnpg-dbclaim-operator
 IMAGE_TAG ?= e2e
 IMG ?= $(IMAGE_REPOSITORY):$(IMAGE_TAG)
 E2E_STRESS_COUNT ?= 10
+E2E_GINKGO_ARGS ?= -ginkgo.v -ginkgo.poll-progress-after=30s -ginkgo.poll-progress-interval=30s
 GO ?= go
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
@@ -133,11 +134,11 @@ operator-install: ## Install the operator chart into the current cluster.
 
 .PHONY: e2e
 e2e: ## Run the kind/CNPG end-to-end suite against the current cluster.
-	$(GO) test -tags=e2e -count=1 -v -timeout 15m ./test/e2e/...
+	$(GO) test -tags=e2e -count=1 -v -timeout 15m ./test/e2e/... $(E2E_GINKGO_ARGS)
 
 .PHONY: e2e-stress
 e2e-stress: ## Run the opt-in e2e stress suite against the current cluster.
-	$(GO) test -tags='e2e e2e_stress' -count=$(E2E_STRESS_COUNT) -v -timeout 60m ./test/e2e/...
+	$(GO) test -tags='e2e e2e_stress' -count=$(E2E_STRESS_COUNT) -v -timeout 60m ./test/e2e/... $(E2E_GINKGO_ARGS)
 
 .PHONY: e2e-local
 e2e-local: kind-up docker-build kind-load cnpg-install cluster-up operator-install e2e ## Bring up kind and run e2e, leaving the cluster for debugging.
