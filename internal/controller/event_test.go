@@ -10,7 +10,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 
 	cnpgclaimv1alpha1 "github.com/wyvernzora/cnpg-dbclaim-operator/api/v1alpha1"
 )
@@ -149,7 +149,7 @@ func TestEmitEvent(t *testing.T) {
 	claim := &cnpgclaimv1alpha1.DatabaseClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
 	}
-	recorder := record.NewFakeRecorder(1)
+	recorder := events.NewFakeRecorder(1)
 
 	emitEvent(recorder, claim, corev1.EventTypeWarning, ReasonClusterMissing, "cluster missing")
 

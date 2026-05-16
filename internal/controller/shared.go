@@ -21,7 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -147,14 +147,14 @@ func shouldEmitDeleteFailureEvent(conds []metav1.Condition, generation int64, wa
 		shouldEmitConditionEvent(conds, generation, ConditionReady, metav1.ConditionFalse, ReasonReconcileFailed)
 }
 
-func emitEvent(recorder record.EventRecorder, obj runtime.Object, eventType, reason, message string) {
+func emitEvent(recorder events.EventRecorder, obj runtime.Object, eventType, reason, message string) {
 	if recorder == nil || obj == nil {
 		return
 	}
 	if message == "" {
 		message = reason
 	}
-	recorder.Event(obj, eventType, reason, message)
+	recorder.Eventf(obj, nil, eventType, reason, reason, "%s", message)
 }
 
 // objectWins reports whether a wins deterministic ownership against b:

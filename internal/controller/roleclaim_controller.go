@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -51,7 +51,7 @@ type RoleClaimReconciler struct {
 	// the apiserver. Used for conflict checks so a freshly Create()-d claim
 	// cannot escape detection via cache lag.
 	APIReader client.Reader
-	Recorder  record.EventRecorder
+	Recorder  events.EventRecorder
 	Scheme    *runtime.Scheme
 }
 
@@ -98,7 +98,7 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 			eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionDatabaseClaimResolved, metav1.ConditionFalse, ReasonDatabaseClaimMissing)
 			setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseClaimResolved, metav1.ConditionFalse, ReasonDatabaseClaimMissing,
 				message)
-			return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonDatabaseClaimMissing, message)
+			return r.failPendingWithEvent(ctx, claim, eventNeeded, ReasonDatabaseClaimMissing, message)
 		}
 		return ctrl.Result{}, err
 	}
@@ -106,7 +106,7 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 		message := "DatabaseClaim is not Ready"
 		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionDatabaseClaimResolved, metav1.ConditionFalse, ReasonDatabaseNotReady)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseClaimResolved, metav1.ConditionFalse, ReasonDatabaseNotReady, message)
-		return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonDatabaseNotReady, message)
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, ReasonDatabaseNotReady, message)
 	}
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseClaimResolved, metav1.ConditionTrue, ReasonProvisioned, "")
 
@@ -115,7 +115,7 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 	if err != nil {
 		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonUnknownSchema)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonUnknownSchema, err.Error())
-		return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonUnknownSchema, err.Error())
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, ReasonUnknownSchema, err.Error())
 	}
 
 	// Owner-conflict check across sibling RoleClaims. Use APIReader (not the
@@ -130,7 +130,7 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 	if conflict := findOwnerConflict(claim, resolved, siblings, &dbClaim); conflict != "" {
 		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonOwnerConflict)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonOwnerConflict, conflict)
-		return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonOwnerConflict, conflict)
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, ReasonOwnerConflict, conflict)
 	}
 
 	roleName := resolvedRoleName(claim)
@@ -142,7 +142,7 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonRoleNameConflict)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonRoleNameConflict, roleConflict)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonRoleNameConflict, roleConflict)
-		return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonRoleNameConflict, roleConflict)
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, ReasonRoleNameConflict, roleConflict)
 	}
 
 	// Resolve cluster connection.
@@ -151,7 +151,7 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 		reason := resolveErrorReason(err)
 		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason, err.Error())
-		return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, reason, err.Error())
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, reason, err.Error())
 	}
 
 	// Materialize Secret (password is generated once, on first reconcile).
@@ -165,7 +165,7 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 	if err != nil {
 		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionSecretReady, metav1.ConditionFalse, ReasonReconcileFailed)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionSecretReady, metav1.ConditionFalse, ReasonReconcileFailed, err.Error())
-		return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonReconcileFailed, err.Error())
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, ReasonReconcileFailed, err.Error())
 	}
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionSecretReady, metav1.ConditionTrue, ReasonProvisioned, "")
 
@@ -175,7 +175,7 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 	if err := r.revokeDrift(ctx, &dbClaim, target, roleName, claim.Status.ResolvedSchemas, resolved); err != nil {
 		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonReconcileFailed)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonReconcileFailed, err.Error())
-		return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonReconcileFailed, err.Error())
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, ReasonReconcileFailed, err.Error())
 	}
 
 	// Apply role and grants. applyRole computes the new default-priv universe
@@ -879,19 +879,13 @@ func (r *RoleClaimReconciler) dropRole(
 	return true, nil
 }
 
-// failPending writes the current conditions, marks the claim Pending, and
-// asks for a requeue.
-func (r *RoleClaimReconciler) failPending(ctx context.Context, claim *cnpgclaimv1alpha1.RoleClaim) (ctrl.Result, error) {
-	return r.failPendingWithEvent(ctx, claim, false, "", "", "")
-}
-
-func (r *RoleClaimReconciler) failPendingWithEvent(ctx context.Context, claim *cnpgclaimv1alpha1.RoleClaim, eventNeeded bool, eventType, reason, message string) (ctrl.Result, error) {
+func (r *RoleClaimReconciler) failPendingWithEvent(ctx context.Context, claim *cnpgclaimv1alpha1.RoleClaim, eventNeeded bool, reason, message string) (ctrl.Result, error) {
 	claim.Status.Phase = cnpgclaimv1alpha1.RoleClaimPhasePending
 	if err := r.Status().Update(ctx, claim); err != nil {
 		return ctrl.Result{}, err
 	}
 	if eventNeeded {
-		emitEvent(r.Recorder, claim, eventType, reason, message)
+		emitEvent(r.Recorder, claim, corev1.EventTypeWarning, reason, message)
 	}
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
@@ -903,7 +897,7 @@ func (r *RoleClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.APIReader = mgr.GetAPIReader()
 	}
 	if r.Recorder == nil {
-		r.Recorder = mgr.GetEventRecorderFor("roleclaim-controller")
+		r.Recorder = mgr.GetEventRecorder("roleclaim-controller")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cnpgclaimv1alpha1.RoleClaim{}).
