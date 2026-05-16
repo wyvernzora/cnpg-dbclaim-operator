@@ -1,0 +1,53 @@
+name: pr-trust-label
+
+on:
+  pull_request_target:
+    types: [synchronize, labeled]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+  statuses: write
+
+jobs:
+  ok-to-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove stale ok-to-test after new commits
+        if: github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'ok-to-test')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh api --method DELETE "repos/$REPOSITORY/issues/$PR_NUMBER/labels/ok-to-test" >/dev/null || true
+          echo "Removed ok-to-test after PR head changed; a maintainer must re-approve the new commit."
+
+      - name: Validate ok-to-test label actor
+        if: github.event.action == 'labeled' && github.event.label.name == 'ok-to-test'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LABEL_ACTOR: ${{ github.actor }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          permission="$(gh api "repos/$REPOSITORY/collaborators/$LABEL_ACTOR/permission" --jq .permission 2>/dev/null || echo none)"
+
+          case "$permission" in
+            admin|maintain|write)
+              echo "$LABEL_ACTOR may approve CI with ok-to-test ($permission)."
+              gh api --method POST "repos/$REPOSITORY/statuses/$HEAD_SHA" \
+                -f state=success \
+                -f context=ok-to-test \
+                -f description="Maintainer approved CI for this commit." \
+                -f target_url="$RUN_URL" >/dev/null
+              ;;
+            *)
+              gh api --method DELETE "repos/$REPOSITORY/issues/$PR_NUMBER/labels/ok-to-test" >/dev/null || true
+              echo "::error::$LABEL_ACTOR does not have write, maintain, or admin permission and cannot approve CI."
+              exit 1
+              ;;
+          esac
