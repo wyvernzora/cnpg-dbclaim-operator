@@ -155,7 +155,7 @@ provision databases and roles.
 ```bash
 helm install dbclaim-operator \
   oci://ghcr.io/wyvernzora/charts/dbclaim-operator \
-  --version 0.2.0 \
+  --version 0.3.0 \
   --namespace cnpg-dbclaim-system \
   --create-namespace
 ```
