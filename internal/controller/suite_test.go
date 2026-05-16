@@ -177,6 +177,13 @@ var _ = Describe("DatabaseClaim", func() {
 			}
 			return reasons
 		}, 20*time.Second, 500*time.Millisecond).Should(Equal([]string{ReasonClusterMissing, ReasonClusterMissing}))
+
+		Eventually(func() int32 {
+			return eventCount(ctx, ns, "DatabaseClaim", claim.Name, ReasonClusterMissing, corev1.EventTypeWarning)
+		}, 20*time.Second, 500*time.Millisecond).Should(Equal(int32(1)))
+		Consistently(func() int32 {
+			return eventCount(ctx, ns, "DatabaseClaim", claim.Name, ReasonClusterMissing, corev1.EventTypeWarning)
+		}, 17*time.Second, 500*time.Millisecond).Should(Equal(int32(1)))
 	})
 
 	It("goes Pending with ClusterNotReady when the Cluster exists but is not ready", func() {
@@ -256,6 +263,10 @@ var _ = Describe("DatabaseClaim", func() {
 			}
 			return cond.Reason
 		}, 20*time.Second, 500*time.Millisecond).Should(Equal(ReasonDatabaseNameConflict))
+
+		Eventually(func() int32 {
+			return eventCount(ctx, ns, "DatabaseClaim", newer.Name, ReasonDatabaseNameConflict, corev1.EventTypeWarning)
+		}, 20*time.Second, 500*time.Millisecond).Should(Equal(int32(1)))
 	})
 })
 
@@ -289,6 +300,10 @@ var _ = Describe("RoleClaim", func() {
 			}
 			return cond.Reason
 		}, 20*time.Second, 500*time.Millisecond).Should(Equal(ReasonDatabaseClaimMissing))
+
+		Eventually(func() int32 {
+			return eventCount(ctx, ns, "RoleClaim", rc.Name, ReasonDatabaseClaimMissing, corev1.EventTypeWarning)
+		}, 20*time.Second, 500*time.Millisecond).Should(Equal(int32(1)))
 	})
 
 	It("rejects creation without spec.roleName", func() {
@@ -458,4 +473,26 @@ func forceDBClaimReady(ctx context.Context, name, namespace string) {
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionTrue, ReasonProvisioned, "")
 		return k8sClient.Status().Update(ctx, &claim)
 	}, 10*time.Second, 250*time.Millisecond).Should(Succeed())
+}
+
+func eventCount(ctx context.Context, namespace, kind, name, reason, eventType string) int32 {
+	var events corev1.EventList
+	if err := k8sClient.List(ctx, &events, client.InNamespace(namespace)); err != nil {
+		return -1
+	}
+	var count int32
+	for _, event := range events.Items {
+		if event.InvolvedObject.Kind != kind ||
+			event.InvolvedObject.Name != name ||
+			event.Reason != reason ||
+			event.Type != eventType {
+			continue
+		}
+		if event.Count == 0 {
+			count++
+			continue
+		}
+		count += event.Count
+	}
+	return count
 }
