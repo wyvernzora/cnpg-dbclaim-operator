@@ -20,13 +20,9 @@ rules:
   - cnpg.wyvernzora.io
   resources:
   - databaseclaims
-  - roleclaims
   verbs:
-  - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -45,6 +41,16 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - cnpg.wyvernzora.io
+  resources:
+  - roleclaims
+  verbs:
+  - delete
+  - get
+  - list
+  - update
+  - watch
 - apiGroups:
   - postgresql.cnpg.io
   resources:
