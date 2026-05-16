@@ -91,6 +91,28 @@ oldest claim wins. Later duplicates stay `Pending` with
 `Reason=DatabaseNameConflict` or `Reason=RoleNameConflict` and do not touch
 SQL state or credentials.
 
+### Cluster opt-in (allowlist)
+
+Cluster owners control which tenant namespaces may target their CNPG
+`Cluster` via an annotation. Cross-namespace claims are **denied by
+default**; claims in the same namespace as the `Cluster` are always allowed.
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: shared-pg
+  namespace: cnpg-system
+  annotations:
+    cnpg.wyvernzora.io/allowed-claim-namespaces: app-team-a,app-team-b
+```
+
+Claims from a namespace not listed (and not same-namespace) park in
+`Pending` with `Reason=ClaimNotAllowed`. Editing the annotation triggers a
+reconcile on every referencing claim. The check applies only to the
+provisioning path; deletion always proceeds so finalizers cannot get
+stranded by a later allowlist tightening.
+
 ## Choosing the right shape
 
 | Situation | Pattern |

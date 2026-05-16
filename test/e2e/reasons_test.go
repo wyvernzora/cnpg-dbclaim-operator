@@ -31,6 +31,7 @@ var _ = Describe("ready reason mapping", Ordered, func() {
 		ns := createNamespace(ctx, "reasons-notready")
 		cluster := "e2e-notready-" + suffix
 		createNotReadyCNPGCluster(ctx, cluster)
+		allowClaimNamespaceOnCluster(ctx, cluster, cnpgNamespace, ns)
 
 		createDBClaimForCluster(ctx, ns, "not-ready-cluster", "e2e_notready_"+suffix, cluster, cnpgNamespace, cnpgclaimv1alpha1.DeletionPolicyRetain, "app")
 		waitDBReadyReason(ctx, ns, "not-ready-cluster", controller.ReasonClusterNotReady)

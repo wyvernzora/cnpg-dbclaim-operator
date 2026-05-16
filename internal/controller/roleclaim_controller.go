@@ -145,9 +145,28 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 		return r.failPendingWithEvent(ctx, claim, eventNeeded, ReasonRoleNameConflict, roleConflict)
 	}
 
-	// Resolve cluster connection.
-	target, err := cnpgresolver.Resolve(ctx, r.Client, dbClaim.Spec.ClusterRef.Name, dbClaim.Spec.ClusterRef.Namespace)
+	// Resolve cluster metadata and enforce cluster-side policy before reading
+	// superuser credentials.
+	target, err := cnpgresolver.ResolveCluster(ctx, r.Client, dbClaim.Spec.ClusterRef.Name, dbClaim.Spec.ClusterRef.Namespace)
 	if err != nil {
+		reason := resolveErrorReason(err)
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason)
+		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason, err.Error())
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, reason, err.Error())
+	}
+	if err := cnpgresolver.CheckClaimAllowed(target, claim.Namespace); err != nil {
+		reason := resolveErrorReason(err)
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason)
+		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason, err.Error())
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, reason, err.Error())
+	}
+	if err := cnpgresolver.CheckClusterReady(target); err != nil {
+		reason := resolveErrorReason(err)
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason)
+		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason, err.Error())
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, reason, err.Error())
+	}
+	if err := cnpgresolver.ResolveSuperuserCredentials(ctx, r.Client, target); err != nil {
 		reason := resolveErrorReason(err)
 		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason, err.Error())
@@ -736,6 +755,8 @@ func resolveErrorReason(err error) string {
 		return ReasonClusterNotReady
 	case errors.Is(err, cnpgresolver.ErrSuperUserSecretMissing):
 		return ReasonSuperuserSecretMissing
+	case errors.Is(err, cnpgresolver.ErrClaimNotAllowed):
+		return ReasonClaimNotAllowed
 	default:
 		return ReasonResolveFailed
 	}

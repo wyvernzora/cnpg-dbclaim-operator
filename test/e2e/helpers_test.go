@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	. "github.com/onsi/ginkgo/v2"
@@ -39,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	cnpgclaimv1alpha1 "github.com/wyvernzora/cnpg-dbclaim-operator/api/v1alpha1"
+	cnpgresolver "github.com/wyvernzora/cnpg-dbclaim-operator/internal/cnpg"
 	"github.com/wyvernzora/cnpg-dbclaim-operator/internal/postgres"
 )
 
@@ -151,12 +153,47 @@ func randomSuffix() string {
 }
 
 func createNamespace(ctx context.Context, base string) string {
+	ns := createNamespaceWithoutClusterAccess(ctx, base)
+	allowClaimNamespace(ctx, ns)
+	return ns
+}
+
+func createNamespaceWithoutClusterAccess(ctx context.Context, base string) string {
 	ns := strings.ToLower(fmt.Sprintf("e2e-%s-%s", base, randomSuffix()))
 	Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
 	DeferCleanup(func(ctx SpecContext) {
 		cleanupNamespace(ctx, ns)
 	}, NodeTimeout(70*time.Second))
 	return ns
+}
+
+func allowClaimNamespace(ctx context.Context, namespace string) {
+	allowClaimNamespaceOnCluster(ctx, clusterName, cnpgNamespace, namespace)
+}
+
+func allowClaimNamespaceOnCluster(ctx context.Context, cluster, clusterNamespace, namespace string) {
+	Eventually(func() error {
+		var cnpgCluster cnpgv1.Cluster
+		if err := k8sClient.Get(ctx, client.ObjectKey{Name: cluster, Namespace: clusterNamespace}, &cnpgCluster); err != nil {
+			return err
+		}
+		if cnpgCluster.Annotations == nil {
+			cnpgCluster.Annotations = map[string]string{}
+		}
+		raw := cnpgCluster.Annotations[cnpgresolver.ClaimAllowlistAnnotation]
+		namespaces := strings.Split(raw, ",")
+		for _, ns := range namespaces {
+			if strings.TrimSpace(ns) == namespace {
+				return nil
+			}
+		}
+		if raw == "" {
+			cnpgCluster.Annotations[cnpgresolver.ClaimAllowlistAnnotation] = namespace
+		} else {
+			cnpgCluster.Annotations[cnpgresolver.ClaimAllowlistAnnotation] = raw + "," + namespace
+		}
+		return k8sClient.Update(ctx, &cnpgCluster)
+	}, e2eTimeout, e2ePollInterval).Should(Succeed())
 }
 
 func cleanupNamespace(ctx context.Context, ns string) {
