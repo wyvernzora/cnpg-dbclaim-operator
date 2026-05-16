@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -50,6 +51,7 @@ type RoleClaimReconciler struct {
 	// the apiserver. Used for conflict checks so a freshly Create()-d claim
 	// cannot escape detection via cache lag.
 	APIReader client.Reader
+	Recorder  record.EventRecorder
 	Scheme    *runtime.Scheme
 }
 
@@ -58,6 +60,7 @@ type RoleClaimReconciler struct {
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=roleclaims/finalizers,verbs=update
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=databaseclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile implements the RoleClaim reconcile loop.
 func (r *RoleClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -91,24 +94,28 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 	dbClaimKey := types.NamespacedName{Name: claim.Spec.DatabaseClaimRef.Name, Namespace: claim.Namespace}
 	if err := r.Get(ctx, dbClaimKey, &dbClaim); err != nil {
 		if apierrors.IsNotFound(err) {
+			message := fmt.Sprintf("DatabaseClaim %q not found in namespace", claim.Spec.DatabaseClaimRef.Name)
+			eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionDatabaseClaimResolved, metav1.ConditionFalse, ReasonDatabaseClaimMissing)
 			setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseClaimResolved, metav1.ConditionFalse, ReasonDatabaseClaimMissing,
-				fmt.Sprintf("DatabaseClaim %q not found in namespace", claim.Spec.DatabaseClaimRef.Name))
-			return r.failPending(ctx, claim)
+				message)
+			return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonDatabaseClaimMissing, message)
 		}
 		return ctrl.Result{}, err
 	}
 	if !isDBClaimReady(&dbClaim) {
-		setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseClaimResolved, metav1.ConditionFalse, ReasonDatabaseNotReady,
-			"DatabaseClaim is not Ready")
-		return r.failPending(ctx, claim)
+		message := "DatabaseClaim is not Ready"
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionDatabaseClaimResolved, metav1.ConditionFalse, ReasonDatabaseNotReady)
+		setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseClaimResolved, metav1.ConditionFalse, ReasonDatabaseNotReady, message)
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonDatabaseNotReady, message)
 	}
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseClaimResolved, metav1.ConditionTrue, ReasonProvisioned, "")
 
 	// Resolve target schemas from sugar or explicit form.
 	resolved, err := resolveSchemas(claim, &dbClaim)
 	if err != nil {
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonUnknownSchema)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonUnknownSchema, err.Error())
-		return r.failPending(ctx, claim)
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonUnknownSchema, err.Error())
 	}
 
 	// Owner-conflict check across sibling RoleClaims. Use APIReader (not the
@@ -121,8 +128,9 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 		return ctrl.Result{}, err
 	}
 	if conflict := findOwnerConflict(claim, resolved, siblings, &dbClaim); conflict != "" {
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonOwnerConflict)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonOwnerConflict, conflict)
-		return r.failPending(ctx, claim)
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonOwnerConflict, conflict)
 	}
 
 	roleName := resolvedRoleName(claim)
@@ -131,17 +139,19 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 		return ctrl.Result{}, err
 	}
 	if roleConflict != "" {
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonRoleNameConflict)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonRoleNameConflict, roleConflict)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonRoleNameConflict, roleConflict)
-		return r.failPending(ctx, claim)
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonRoleNameConflict, roleConflict)
 	}
 
 	// Resolve cluster connection.
 	target, err := cnpgresolver.Resolve(ctx, r.Client, dbClaim.Spec.ClusterRef.Name, dbClaim.Spec.ClusterRef.Namespace)
 	if err != nil {
 		reason := resolveErrorReason(err)
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason, err.Error())
-		return r.failPending(ctx, claim)
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, reason, err.Error())
 	}
 
 	// Materialize Secret (password is generated once, on first reconcile).
@@ -153,8 +163,9 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 		User:   roleName,
 	})
 	if err != nil {
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionSecretReady, metav1.ConditionFalse, ReasonReconcileFailed)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionSecretReady, metav1.ConditionFalse, ReasonReconcileFailed, err.Error())
-		return r.failPending(ctx, claim)
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonReconcileFailed, err.Error())
 	}
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionSecretReady, metav1.ConditionTrue, ReasonProvisioned, "")
 
@@ -162,8 +173,9 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 	// (e.g. ReadWrite -> ReadOnly on a schema) converges. revokeDrift catches
 	// both dropped schemas and access-level changes.
 	if err := r.revokeDrift(ctx, &dbClaim, target, roleName, claim.Status.ResolvedSchemas, resolved); err != nil {
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonReconcileFailed)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonReconcileFailed, err.Error())
-		return r.failPending(ctx, claim)
+		return r.failPendingWithEvent(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonReconcileFailed, err.Error())
 	}
 
 	// Apply role and grants. applyRole computes the new default-priv universe
@@ -171,11 +183,15 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 	// returning the new list (or nil on no-op) so we can persist it below.
 	newAppliedDefaultPrivs, err := r.applyRole(ctx, &dbClaim, target, claim, roleName, password, resolved)
 	if err != nil {
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconcileFailed)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionFalse, ReasonReconcileFailed, err.Error())
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconcileFailed, err.Error())
 		claim.Status.Phase = cnpgclaimv1alpha1.RoleClaimPhaseFailed
 		if statusErr := r.Status().Update(ctx, claim); statusErr != nil {
 			return ctrl.Result{}, errors.Join(err, fmt.Errorf("status update after apply error: %w", statusErr))
+		}
+		if eventNeeded {
+			emitEvent(r.Recorder, claim, corev1.EventTypeWarning, ReasonReconcileFailed, err.Error())
 		}
 		return ctrl.Result{}, err
 	}
@@ -185,12 +201,16 @@ func (r *RoleClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgcl
 	claim.Status.ResolvedSchemas = resolved
 	claim.Status.AppliedDefaultPrivileges = newAppliedDefaultPrivs
 	claim.Status.ObservedGeneration = claim.Generation
+	provisionedEvent := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionTrue, ReasonProvisioned)
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionRoleReady, metav1.ConditionTrue, ReasonProvisioned, "")
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionTrue, ReasonProvisioned, "")
 	claim.Status.Phase = cnpgclaimv1alpha1.RoleClaimPhaseReady
 
 	if err := r.Status().Update(ctx, claim); err != nil {
 		return ctrl.Result{}, err
+	}
+	if provisionedEvent {
+		emitEvent(r.Recorder, claim, corev1.EventTypeNormal, ReasonProvisioned, fmt.Sprintf("role %q provisioned", roleName))
 	}
 	return ctrl.Result{}, nil
 }
@@ -752,6 +772,8 @@ func (r *RoleClaimReconciler) reconcileDelete(ctx context.Context, claim *cnpgcl
 	var dbClaim cnpgclaimv1alpha1.DatabaseClaim
 	dbClaimKey := types.NamespacedName{Name: claim.Spec.DatabaseClaimRef.Name, Namespace: claim.Namespace}
 	dbErr := r.Get(ctx, dbClaimKey, &dbClaim)
+	teardownReason := ""
+	teardownMessage := ""
 
 	if dbErr == nil {
 		roleName := claim.Status.RoleName
@@ -760,24 +782,40 @@ func (r *RoleClaimReconciler) reconcileDelete(ctx context.Context, claim *cnpgcl
 		}
 		ownedElsewhere, err := r.otherRoleClaimOwnsPhysicalRole(ctx, claim, &dbClaim, roleName)
 		if err != nil {
-			return ctrl.Result{}, err
+			return r.failDelete(ctx, claim, err)
 		}
 		if ownedElsewhere {
 			log.FromContext(ctx).Info("another RoleClaim still owns physical role; releasing finalizer without DROP",
 				"role", roleName, "cluster", dbClaim.Spec.ClusterRef)
+			teardownReason = ReasonTeardownSkipped
+			teardownMessage = fmt.Sprintf("role %q left in place because another RoleClaim still owns it", roleName)
 		} else {
 			target, err := cnpgresolver.Resolve(ctx, r.Client, dbClaim.Spec.ClusterRef.Name, dbClaim.Spec.ClusterRef.Namespace)
 			if err == nil {
-				if dropErr := r.dropRole(ctx, &dbClaim, target, claim); dropErr != nil {
+				dropped, dropErr := r.dropRole(ctx, &dbClaim, target, claim)
+				if dropErr != nil {
 					log.FromContext(ctx).Error(dropErr, "drop role failed")
-					return ctrl.Result{}, dropErr
+					return r.failDelete(ctx, claim, dropErr)
+				}
+				if dropped {
+					teardownReason = ReasonRoleDropped
+					teardownMessage = fmt.Sprintf("role %q dropped", roleName)
+				} else {
+					teardownReason = ReasonTeardownSkipped
+					teardownMessage = fmt.Sprintf("role %q teardown skipped because the role name was never valid", roleName)
 				}
 			} else if !isClusterGoneGracePeriodPassed(claim, err) {
-				return ctrl.Result{}, err
+				return r.failDelete(ctx, claim, err)
+			} else {
+				teardownReason = ReasonTeardownSkipped
+				teardownMessage = fmt.Sprintf("role %q teardown skipped after cluster access was unavailable past the grace period", roleName)
 			}
 		}
 	} else if !apierrors.IsNotFound(dbErr) {
-		return ctrl.Result{}, dbErr
+		return r.failDelete(ctx, claim, dbErr)
+	} else {
+		teardownReason = ReasonTeardownSkipped
+		teardownMessage = "role teardown skipped because the DatabaseClaim no longer exists"
 	}
 	// If dbClaim is gone or cluster gone past grace, just release the finalizer.
 
@@ -785,7 +823,22 @@ func (r *RoleClaimReconciler) reconcileDelete(ctx context.Context, claim *cnpgcl
 	if err := updateFinalizers(ctx, r.Client, claim); err != nil {
 		return ctrl.Result{}, err
 	}
+	emitEvent(r.Recorder, claim, corev1.EventTypeNormal, teardownReason, teardownMessage)
 	return ctrl.Result{}, nil
+}
+
+func (r *RoleClaimReconciler) failDelete(ctx context.Context, claim *cnpgclaimv1alpha1.RoleClaim, err error) (ctrl.Result, error) {
+	message := err.Error()
+	eventNeeded := shouldEmitDeleteFailureEvent(claim.Status.Conditions, claim.Generation, claim.Status.Phase == cnpgclaimv1alpha1.RoleClaimPhaseTerminating)
+	setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconcileFailed, message)
+	claim.Status.Phase = cnpgclaimv1alpha1.RoleClaimPhaseTerminating
+	if statusErr := r.Status().Update(ctx, claim); statusErr != nil {
+		return ctrl.Result{}, errors.Join(err, fmt.Errorf("status update after delete error: %w", statusErr))
+	}
+	if eventNeeded {
+		emitEvent(r.Recorder, claim, corev1.EventTypeWarning, ReasonReconcileFailed, message)
+	}
+	return ctrl.Result{}, err
 }
 
 func isClusterGoneGracePeriodPassed(claim *cnpgclaimv1alpha1.RoleClaim, err error) bool {
@@ -807,28 +860,38 @@ func (r *RoleClaimReconciler) dropRole(
 	dbClaim *cnpgclaimv1alpha1.DatabaseClaim,
 	target *cnpgresolver.ClusterTarget,
 	claim *cnpgclaimv1alpha1.RoleClaim,
-) error {
+) (bool, error) {
 	roleName := claim.Status.RoleName
 	if roleName == "" {
 		roleName = resolvedRoleName(claim)
 	}
 	if err := postgres.ValidateIdentifier(roleName); err != nil {
-		return nil // never provisioned with a valid name; nothing to drop
+		return false, nil // never provisioned with a valid name; nothing to drop
 	}
 	dbConn, err := postgres.Open(ctx, target.ConnOpts(dbClaim.Spec.DatabaseName))
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer dbConn.Close(ctx)
-	return postgres.DropRole(ctx, dbConn, roleName, target.SuperUser)
+	if err := postgres.DropRole(ctx, dbConn, roleName, target.SuperUser); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // failPending writes the current conditions, marks the claim Pending, and
 // asks for a requeue.
 func (r *RoleClaimReconciler) failPending(ctx context.Context, claim *cnpgclaimv1alpha1.RoleClaim) (ctrl.Result, error) {
+	return r.failPendingWithEvent(ctx, claim, false, "", "", "")
+}
+
+func (r *RoleClaimReconciler) failPendingWithEvent(ctx context.Context, claim *cnpgclaimv1alpha1.RoleClaim, eventNeeded bool, eventType, reason, message string) (ctrl.Result, error) {
 	claim.Status.Phase = cnpgclaimv1alpha1.RoleClaimPhasePending
 	if err := r.Status().Update(ctx, claim); err != nil {
 		return ctrl.Result{}, err
+	}
+	if eventNeeded {
+		emitEvent(r.Recorder, claim, eventType, reason, message)
 	}
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
@@ -838,6 +901,9 @@ func (r *RoleClaimReconciler) failPending(ctx context.Context, claim *cnpgclaimv
 func (r *RoleClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
+	}
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorderFor("roleclaim-controller")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cnpgclaimv1alpha1.RoleClaim{}).

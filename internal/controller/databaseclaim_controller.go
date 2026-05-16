@@ -17,9 +17,11 @@ import (
 	"time"
 
 	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -36,6 +38,7 @@ import (
 type DatabaseClaimReconciler struct {
 	client.Client
 	APIReader client.Reader
+	Recorder  record.EventRecorder
 	Scheme    *runtime.Scheme
 }
 
@@ -45,6 +48,7 @@ type DatabaseClaimReconciler struct {
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=roleclaims,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile implements the DatabaseClaim reconcile loop.
 func (r *DatabaseClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -78,11 +82,15 @@ func (r *DatabaseClaimReconciler) reconcileNormal(ctx context.Context, claim *cn
 		return ctrl.Result{}, err
 	}
 	if conflict := findDatabaseNameConflict(claim, claims); conflict != "" {
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonDatabaseNameConflict)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseReady, metav1.ConditionFalse, ReasonDatabaseNameConflict, conflict)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonDatabaseNameConflict, conflict)
 		claim.Status.Phase = cnpgclaimv1alpha1.DatabaseClaimPhasePending
 		if err := r.Status().Update(ctx, claim); err != nil {
 			return ctrl.Result{}, err
+		}
+		if eventNeeded {
+			emitEvent(r.Recorder, claim, corev1.EventTypeWarning, ReasonDatabaseNameConflict, conflict)
 		}
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
@@ -94,11 +102,15 @@ func (r *DatabaseClaimReconciler) reconcileNormal(ctx context.Context, claim *cn
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionClusterResolved, metav1.ConditionTrue, ReasonProvisioned, "cluster resolved")
 
 	if err := r.applyDatabase(ctx, claim, target); err != nil {
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconcileFailed)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseReady, metav1.ConditionFalse, ReasonReconcileFailed, err.Error())
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconcileFailed, err.Error())
 		claim.Status.Phase = cnpgclaimv1alpha1.DatabaseClaimPhaseFailed
 		if statusErr := r.Status().Update(ctx, claim); statusErr != nil {
 			return ctrl.Result{}, errors.Join(err, fmt.Errorf("status update after apply error: %w", statusErr))
+		}
+		if eventNeeded {
+			emitEvent(r.Recorder, claim, corev1.EventTypeWarning, ReasonReconcileFailed, err.Error())
 		}
 		return ctrl.Result{}, err
 	}
@@ -109,12 +121,16 @@ func (r *DatabaseClaimReconciler) reconcileNormal(ctx context.Context, claim *cn
 		DBName: claim.Spec.DatabaseName,
 	}
 	claim.Status.ObservedGeneration = claim.Generation
+	provisionedEvent := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionTrue, ReasonProvisioned)
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseReady, metav1.ConditionTrue, ReasonProvisioned, "database provisioned")
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionTrue, ReasonProvisioned, "")
 	claim.Status.Phase = cnpgclaimv1alpha1.DatabaseClaimPhaseReady
 
 	if err := r.Status().Update(ctx, claim); err != nil {
 		return ctrl.Result{}, err
+	}
+	if provisionedEvent {
+		emitEvent(r.Recorder, claim, corev1.EventTypeNormal, ReasonProvisioned, fmt.Sprintf("database %q provisioned", claim.Spec.DatabaseName))
 	}
 	return ctrl.Result{}, nil
 }
@@ -129,11 +145,15 @@ func (r *DatabaseClaimReconciler) handleResolveError(ctx context.Context, claim 
 	default:
 		reason = ReasonResolveFailed
 	}
+	eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason)
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionClusterResolved, metav1.ConditionFalse, reason, err.Error())
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason, err.Error())
 	claim.Status.Phase = cnpgclaimv1alpha1.DatabaseClaimPhasePending
 	if statusErr := r.Status().Update(ctx, claim); statusErr != nil {
 		return ctrl.Result{}, statusErr
+	}
+	if eventNeeded {
+		emitEvent(r.Recorder, claim, corev1.EventTypeWarning, reason, err.Error())
 	}
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
@@ -187,6 +207,8 @@ func (r *DatabaseClaimReconciler) reconcileDelete(ctx context.Context, claim *cn
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	teardownReason := ""
+	teardownMessage := ""
 
 	switch claim.Spec.DeletionPolicy {
 	case cnpgclaimv1alpha1.DeletionPolicyDelete:
@@ -200,10 +222,14 @@ func (r *DatabaseClaimReconciler) reconcileDelete(ctx context.Context, claim *cn
 					}
 				}
 			}
-			setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconciling,
-				fmt.Sprintf("cascading deletion of %d RoleClaim(s)", len(referrers)))
+			message := fmt.Sprintf("cascading deletion of %d RoleClaim(s)", len(referrers))
+			eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconciling)
+			setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconciling, message)
 			if err := r.Status().Update(ctx, claim); err != nil {
 				return ctrl.Result{}, err
+			}
+			if eventNeeded {
+				emitEvent(r.Recorder, claim, corev1.EventTypeNormal, ReasonReconciling, message)
 			}
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
@@ -215,10 +241,20 @@ func (r *DatabaseClaimReconciler) reconcileDelete(ctx context.Context, claim *cn
 		if otherDatabaseClaimOwnsPhysicalDatabase(claim, claims) {
 			log.FromContext(ctx).Info("another DatabaseClaim still owns physical database; releasing finalizer without DROP",
 				"database", claim.Spec.DatabaseName, "cluster", claim.Spec.ClusterRef)
+			teardownReason = ReasonTeardownSkipped
+			teardownMessage = fmt.Sprintf("database %q left in place because another DatabaseClaim still owns it", claim.Spec.DatabaseName)
 			break
 		}
-		if err := r.dropDatabase(ctx, claim); err != nil {
-			return ctrl.Result{}, err
+		dropped, err := r.dropDatabase(ctx, claim)
+		if err != nil {
+			return r.failDelete(ctx, claim, err)
+		}
+		if dropped {
+			teardownReason = ReasonDatabaseDropped
+			teardownMessage = fmt.Sprintf("database %q dropped", claim.Spec.DatabaseName)
+		} else {
+			teardownReason = ReasonTeardownSkipped
+			teardownMessage = fmt.Sprintf("database %q teardown skipped after cluster access was unavailable past the grace period", claim.Spec.DatabaseName)
 		}
 	default:
 		// Retain (default): refuse-to-orphan.
@@ -227,24 +263,45 @@ func (r *DatabaseClaimReconciler) reconcileDelete(ctx context.Context, claim *cn
 			for _, rc := range referrers {
 				names = append(names, rc.Name)
 			}
-			setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonBlockedByRoleClaims,
-				fmt.Sprintf("RoleClaims still reference this DatabaseClaim: %v", names))
+			message := fmt.Sprintf("RoleClaims still reference this DatabaseClaim: %v", names)
+			eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonBlockedByRoleClaims)
+			setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonBlockedByRoleClaims, message)
 			if err := r.Status().Update(ctx, claim); err != nil {
 				return ctrl.Result{}, err
+			}
+			if eventNeeded {
+				emitEvent(r.Recorder, claim, corev1.EventTypeWarning, ReasonBlockedByRoleClaims, message)
 			}
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 		// Retain + no referrers: just release the finalizer; do NOT drop the DB.
+		teardownReason = ReasonDatabaseRetained
+		teardownMessage = fmt.Sprintf("database %q retained", claim.Spec.DatabaseName)
 	}
 
 	controllerutil.RemoveFinalizer(claim, DatabaseClaimFinalizer)
 	if err := updateFinalizers(ctx, r.Client, claim); err != nil {
 		return ctrl.Result{}, err
 	}
+	emitEvent(r.Recorder, claim, corev1.EventTypeNormal, teardownReason, teardownMessage)
 	return ctrl.Result{}, nil
 }
 
-func (r *DatabaseClaimReconciler) dropDatabase(ctx context.Context, claim *cnpgclaimv1alpha1.DatabaseClaim) error {
+func (r *DatabaseClaimReconciler) failDelete(ctx context.Context, claim *cnpgclaimv1alpha1.DatabaseClaim, err error) (ctrl.Result, error) {
+	message := err.Error()
+	eventNeeded := shouldEmitDeleteFailureEvent(claim.Status.Conditions, claim.Generation, claim.Status.Phase == cnpgclaimv1alpha1.DatabaseClaimPhaseTerminating)
+	setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconcileFailed, message)
+	claim.Status.Phase = cnpgclaimv1alpha1.DatabaseClaimPhaseTerminating
+	if statusErr := r.Status().Update(ctx, claim); statusErr != nil {
+		return ctrl.Result{}, errors.Join(err, fmt.Errorf("status update after delete error: %w", statusErr))
+	}
+	if eventNeeded {
+		emitEvent(r.Recorder, claim, corev1.EventTypeWarning, ReasonReconcileFailed, message)
+	}
+	return ctrl.Result{}, err
+}
+
+func (r *DatabaseClaimReconciler) dropDatabase(ctx context.Context, claim *cnpgclaimv1alpha1.DatabaseClaim) (bool, error) {
 	target, err := cnpgresolver.Resolve(ctx, r.Client, claim.Spec.ClusterRef.Name, claim.Spec.ClusterRef.Namespace)
 	if err != nil {
 		if errors.Is(err, cnpgresolver.ErrClusterNotFound) || errors.Is(err, cnpgresolver.ErrSuperUserSecretMissing) {
@@ -252,20 +309,23 @@ func (r *DatabaseClaimReconciler) dropDatabase(ctx context.Context, claim *cnpgc
 			if claim.DeletionTimestamp != nil && time.Since(claim.DeletionTimestamp.Time) > clusterGoneGracePeriod {
 				log.FromContext(ctx).Info("cluster gone past grace period; releasing finalizer without DROP",
 					"cluster", claim.Spec.ClusterRef)
-				return nil
+				return false, nil
 			}
 		}
-		return err
+		return false, err
 	}
 	adminConn, err := postgres.Open(ctx, target.ConnOpts(postgres.AdminDatabase))
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer adminConn.Close(ctx)
 	if err := postgres.TerminateBackends(ctx, adminConn, claim.Spec.DatabaseName); err != nil {
-		return err
+		return false, err
 	}
-	return postgres.DropDatabase(ctx, adminConn, claim.Spec.DatabaseName)
+	if err := postgres.DropDatabase(ctx, adminConn, claim.Spec.DatabaseName); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // SetupWithManager wires up the controller. Field indexes must be installed
@@ -273,6 +333,9 @@ func (r *DatabaseClaimReconciler) dropDatabase(ctx context.Context, claim *cnpgc
 func (r *DatabaseClaimReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
+	}
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorderFor("databaseclaim-controller")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cnpgclaimv1alpha1.DatabaseClaim{}).

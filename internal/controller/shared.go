@@ -19,7 +19,9 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -58,6 +60,15 @@ const (
 	ReasonDatabaseNameConflict = "DatabaseNameConflict"
 	ReasonRoleNameConflict     = "RoleNameConflict"
 	ReasonBlockedByRoleClaims  = "BlockedByRoleClaims"
+)
+
+// Event-only reasons for lifecycle paths that do not map cleanly to status
+// conditions.
+const (
+	ReasonDatabaseDropped  = "DatabaseDropped"
+	ReasonDatabaseRetained = "DatabaseRetained"
+	ReasonRoleDropped      = "RoleDropped"
+	ReasonTeardownSkipped  = "TeardownSkipped"
 )
 
 // clusterGoneGracePeriod is how long we keep retrying a DROP/REASSIGN against
@@ -121,6 +132,29 @@ func setCondition(conds *[]metav1.Condition, generation int64, t string, status 
 		Message:            message,
 		ObservedGeneration: generation,
 	})
+}
+
+func shouldEmitConditionEvent(conds []metav1.Condition, generation int64, t string, status metav1.ConditionStatus, reason string) bool {
+	cond := meta.FindStatusCondition(conds, t)
+	return cond == nil ||
+		cond.ObservedGeneration != generation ||
+		cond.Status != status ||
+		cond.Reason != reason
+}
+
+func shouldEmitDeleteFailureEvent(conds []metav1.Condition, generation int64, wasTerminating bool) bool {
+	return !wasTerminating ||
+		shouldEmitConditionEvent(conds, generation, ConditionReady, metav1.ConditionFalse, ReasonReconcileFailed)
+}
+
+func emitEvent(recorder record.EventRecorder, obj runtime.Object, eventType, reason, message string) {
+	if recorder == nil || obj == nil {
+		return
+	}
+	if message == "" {
+		message = reason
+	}
+	recorder.Event(obj, eventType, reason, message)
 }
 
 // objectWins reports whether a wins deterministic ownership against b:
