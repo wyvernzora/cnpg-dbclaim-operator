@@ -1,6 +1,6 @@
 # cnpg-dbclaim-operator Makefile
 
-CNPG_VERSION ?= 1.29.1
+CNPG_VERSION ?= 1.30.0
 CNPG_MINOR ?= $(shell printf '%s\n' "$(CNPG_VERSION)" | awk -F. '{print $$1 "." $$2}')
 IMAGE_REPOSITORY ?= cnpg-dbclaim-operator
 IMAGE_TAG ?= e2e
