@@ -66,7 +66,7 @@ jobs:
     if: needs.trust-gate.outputs.trusted == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -95,7 +95,7 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
@@ -172,7 +172,7 @@ jobs:
     if: needs.trust-gate.outputs.trusted == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -186,7 +186,7 @@ jobs:
     if: needs.trust-gate.outputs.trusted == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -198,7 +198,7 @@ jobs:
     if: needs.trust-gate.outputs.trusted == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
       - run: make chart-lint
       - run: make chart-template
@@ -212,7 +212,7 @@ jobs:
       IMAGE_REPOSITORY: cnpg-dbclaim-operator
       IMAGE_TAG: e2e
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -248,7 +248,7 @@ jobs:
       IMAGE_REPOSITORY: cnpg-dbclaim-operator
       IMAGE_TAG: e2e
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
