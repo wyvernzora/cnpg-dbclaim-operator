@@ -38,9 +38,44 @@ spec:
     name: shared-pg
     namespace: cnpg-system
   schemas: [app]
-  extensions: [pgcrypto]
+  extensions:
+    - name: pgcrypto              # server-default placement (public)
+    - name: pg_trgm
+      schema: app                 # objects created in schema "app"
   deletionPolicy: Retain          # Retain (default) | Delete
 ```
+
+#### Extension placement
+
+`CREATE EXTENSION` puts the extension's operator classes and functions in one
+schema. An application that pins its runtime `search_path` to a claimed schema
+(`search_path=app`) cannot resolve them from anywhere else — `operator class
+"gist_trgm_ops" does not exist for access method "gist"` is that failure. Set
+`extensions[].schema` to install the extension where those consumers will look:
+
+- **`schema` set** — a declared desired state. The extension is created with
+  `CREATE EXTENSION IF NOT EXISTS <name> SCHEMA <schema>`, and an extension
+  that already exists in a different schema is **converged** onto the declared
+  one with `ALTER EXTENSION <name> SET SCHEMA <schema>` — the same reconcile
+  CloudNativePG's own `Database` CRD performs for `extensions[].schema`. The
+  value must be one of the claim's own `spec.schemas`; a schema outside that
+  list is rejected at `kubectl apply`, and schemas are created before
+  extensions are installed, so the target always exists.
+- **`schema` omitted** — the global-by-convention case, and no opinion. Postgres
+  has no truly global extension, so there is no separate spelling for it: the
+  extension is created without a `SCHEMA` clause and lands wherever the
+  provisioning superuser's default `search_path` puts it, in practice `public`.
+  Nothing is ever relocated on this path, including an extension that already
+  lives somewhere else.
+
+Convergence needs the read-back because `CREATE EXTENSION IF NOT EXISTS`
+silently ignores its `SCHEMA` clause when the extension already exists. Some
+extensions declare themselves non-relocatable, and Postgres refuses to move
+those (`extension "xml2" does not support SET SCHEMA`). That failure is
+surfaced, not swallowed: the claim goes `Failed` with
+`Reason=ExtensionRelocationFailed` and a Warning event carrying the Postgres
+error and both schemas. Resolve it by hand — drop and recreate the extension in
+the schema you want, or point the claim at the schema it already occupies.
 
 ### RoleClaim
 

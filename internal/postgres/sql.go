@@ -109,17 +109,87 @@ func EnsureSchema(ctx context.Context, conn *pgx.Conn, name string) error {
 	return nil
 }
 
+// ExtensionRelocationError reports that an extension exists in the wrong
+// schema and could not be moved. The usual cause is a non-relocatable
+// extension, whose control file forbids SET SCHEMA outright.
+type ExtensionRelocationError struct {
+	Extension string
+	From      string
+	To        string
+	Err       error
+}
+
+func (e *ExtensionRelocationError) Error() string {
+	return fmt.Sprintf("relocate extension %q from schema %q to schema %q: %v", e.Extension, e.From, e.To, e.Err)
+}
+
+func (e *ExtensionRelocationError) Unwrap() error { return e.Err }
+
 // EnsureExtension runs CREATE EXTENSION IF NOT EXISTS for the named extension
-// in the current database. Version updates are out of scope.
-func EnsureExtension(ctx context.Context, conn *pgx.Conn, name string) error {
-	if err := ValidateIdentifier(name); err != nil {
+// in the current database, converging its schema on the requested one. Version
+// updates are out of scope.
+//
+// An empty schema means no opinion: placement is left to the server's default
+// search_path on first install, and an extension that already exists is not
+// moved. A non-empty schema is a declared desired state, so placement is read
+// back after the CREATE — which is a silent no-op when the extension already
+// exists — and drift is corrected with ALTER EXTENSION ... SET SCHEMA, the
+// same convergence CloudNativePG's own Database CRD performs. A
+// non-relocatable extension makes that statement fail loudly rather than
+// silently leaving the claim's stated intent unmet.
+func EnsureExtension(ctx context.Context, conn *pgx.Conn, name, schema string) error {
+	stmt, err := ensureExtensionStmt(name, schema)
+	if err != nil {
 		return err
 	}
-	stmt := fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS %s", Quote(name))
 	if _, err := conn.Exec(ctx, stmt); err != nil {
 		return fmt.Errorf("create extension %q: %w", name, err)
 	}
+	if schema == "" {
+		return nil
+	}
+	actual, err := extensionSchema(ctx, conn, name)
+	if err != nil {
+		return err
+	}
+	if actual == schema {
+		return nil
+	}
+	if _, err := conn.Exec(ctx, alterExtensionSchemaStmt(name, schema)); err != nil {
+		return &ExtensionRelocationError{Extension: name, From: actual, To: schema, Err: err}
+	}
 	return nil
+}
+
+func ensureExtensionStmt(name, schema string) (string, error) {
+	if err := ValidateIdentifier(name); err != nil {
+		return "", err
+	}
+	if schema == "" {
+		return fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS %s", Quote(name)), nil
+	}
+	if err := ValidateIdentifier(schema); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS %s SCHEMA %s", Quote(name), Quote(schema)), nil
+}
+
+// alterExtensionSchemaStmt builds the relocation statement. Both identifiers
+// have already been validated by ensureExtensionStmt on the same call path.
+func alterExtensionSchemaStmt(name, schema string) string {
+	return fmt.Sprintf("ALTER EXTENSION %s SET SCHEMA %s", Quote(name), Quote(schema))
+}
+
+// extensionSchema returns the schema an installed extension's objects live in.
+func extensionSchema(ctx context.Context, conn *pgx.Conn, name string) (string, error) {
+	var schema string
+	err := conn.QueryRow(ctx,
+		`SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = $1`,
+		name).Scan(&schema)
+	if err != nil {
+		return "", fmt.Errorf("look up schema of extension %q: %w", name, err)
+	}
+	return schema, nil
 }
 
 // EnsureRole creates the role if missing, then aligns LOGIN, PASSWORD, and

@@ -32,6 +32,38 @@ type ClusterReference struct {
 	Namespace string `json:"namespace"`
 }
 
+// ExtensionSpec names a Postgres extension to install and, optionally, the
+// schema its objects are created in.
+type ExtensionSpec struct {
+	// Name of the Postgres extension (e.g., "pgcrypto").
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z_][a-z0-9_]{0,62}$`
+	Name string `json:"name"`
+
+	// Schema to install the extension's objects into. Must be one of
+	// spec.schemas — this is enforced at admission, and spec.schemas is
+	// ensured before extensions are installed, so a schema-targeted extension
+	// can never name a schema that does not exist. Consumers that pin their
+	// runtime search_path to that schema can then resolve the extension's
+	// operator classes and functions.
+	//
+	// Leave unset for the "global by convention" case: Postgres has no truly
+	// global extension, so an unset schema simply means CREATE EXTENSION
+	// without a SCHEMA clause, landing the objects wherever the provisioning
+	// superuser's default search_path puts them (in practice, "public").
+	// There is no separate spelling for global.
+	//
+	// A set schema is a declared desired state, so an extension that already
+	// exists in a different schema is relocated with ALTER EXTENSION ... SET
+	// SCHEMA, matching CloudNativePG's own Database CRD. Extensions that
+	// declare themselves non-relocatable cannot be moved; that failure
+	// surfaces as Reason=ExtensionRelocationFailed for an operator to resolve.
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z_][a-z0-9_]{0,62}$`
+	Schema string `json:"schema,omitempty"`
+}
+
 // DeletionPolicy controls what happens to the underlying Postgres database when
 // the DatabaseClaim is deleted.
 // +kubebuilder:validation:Enum=Retain;Delete
@@ -50,6 +82,7 @@ const (
 // DatabaseClaimSpec defines the desired state of DatabaseClaim.
 // +kubebuilder:validation:XValidation:rule="self.databaseName == oldSelf.databaseName",message="databaseName is immutable"
 // +kubebuilder:validation:XValidation:rule="self.clusterRef == oldSelf.clusterRef",message="clusterRef is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(self.extensions) || self.extensions.all(e, !has(e.schema) || (has(self.schemas) && e.schema in self.schemas))",message="each extension schema must be declared in spec.schemas"
 type DatabaseClaimSpec struct {
 	// DatabaseName is the Postgres database name to provision. Immutable.
 	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9_]{0,62}$`
@@ -60,14 +93,16 @@ type DatabaseClaimSpec struct {
 	// Immutable.
 	ClusterRef ClusterReference `json:"clusterRef"`
 
-	// Extensions to install in the database. Each entry is the Postgres
-	// extension name (e.g., "pgcrypto"). Installed at the default version
+	// Extensions to install in the database. Installed at the default version
 	// via CREATE EXTENSION IF NOT EXISTS. Version updates are out of scope
-	// in v1.
+	// in v1. Both this list and spec.schemas are capped at 32 entries so the
+	// admission rule cross-checking them stays inside the API server's CEL
+	// cost budget.
 	// +optional
-	// +listType=atomic
-	// +kubebuilder:validation:items:Pattern=`^[a-z_][a-z0-9_]{0,62}$`
-	Extensions []string `json:"extensions,omitempty"`
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=32
+	Extensions []ExtensionSpec `json:"extensions,omitempty"`
 
 	// Schemas to ensure in the database. Each entry is created with
 	// CREATE SCHEMA IF NOT EXISTS, initially owned by the superuser.
@@ -76,6 +111,8 @@ type DatabaseClaimSpec struct {
 	// dropped manually.
 	// +optional
 	// +listType=set
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=63
 	// +kubebuilder:validation:items:Pattern=`^[a-z_][a-z0-9_]{0,62}$`
 	Schemas []string `json:"schemas,omitempty"`
 

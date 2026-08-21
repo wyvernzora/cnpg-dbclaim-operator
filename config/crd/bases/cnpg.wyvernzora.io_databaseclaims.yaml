@@ -98,15 +98,52 @@ spec:
                 type: string
               extensions:
                 description: |-
-                  Extensions to install in the database. Each entry is the Postgres
-                  extension name (e.g., "pgcrypto"). Installed at the default version
+                  Extensions to install in the database. Installed at the default version
                   via CREATE EXTENSION IF NOT EXISTS. Version updates are out of scope
-                  in v1.
+                  in v1. Both this list and spec.schemas are capped at 32 entries so the
+                  admission rule cross-checking them stays inside the API server's CEL
+                  cost budget.
                 items:
-                  pattern: ^[a-z_][a-z0-9_]{0,62}$
-                  type: string
+                  description: |-
+                    ExtensionSpec names a Postgres extension to install and, optionally, the
+                    schema its objects are created in.
+                  properties:
+                    name:
+                      description: Name of the Postgres extension (e.g., "pgcrypto").
+                      maxLength: 63
+                      pattern: ^[a-z_][a-z0-9_]{0,62}$
+                      type: string
+                    schema:
+                      description: |-
+                        Schema to install the extension's objects into. Must be one of
+                        spec.schemas — this is enforced at admission, and spec.schemas is
+                        ensured before extensions are installed, so a schema-targeted extension
+                        can never name a schema that does not exist. Consumers that pin their
+                        runtime search_path to that schema can then resolve the extension's
+                        operator classes and functions.
+
+                        Leave unset for the "global by convention" case: Postgres has no truly
+                        global extension, so an unset schema simply means CREATE EXTENSION
+                        without a SCHEMA clause, landing the objects wherever the provisioning
+                        superuser's default search_path puts them (in practice, "public").
+                        There is no separate spelling for global.
+
+                        A set schema is a declared desired state, so an extension that already
+                        exists in a different schema is relocated with ALTER EXTENSION ... SET
+                        SCHEMA, matching CloudNativePG's own Database CRD. Extensions that
+                        declare themselves non-relocatable cannot be moved; that failure
+                        surfaces as Reason=ExtensionRelocationFailed for an operator to resolve.
+                      maxLength: 63
+                      pattern: ^[a-z_][a-z0-9_]{0,62}$
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 32
                 type: array
-                x-kubernetes-list-type: atomic
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               schemas:
                 description: |-
                   Schemas to ensure in the database. Each entry is created with
@@ -115,8 +152,10 @@ spec:
                   Removing an entry from this list is a no-op in v1; schemas must be
                   dropped manually.
                 items:
+                  maxLength: 63
                   pattern: ^[a-z_][a-z0-9_]{0,62}$
                   type: string
+                maxItems: 32
                 type: array
                 x-kubernetes-list-type: set
             required:
@@ -128,6 +167,9 @@ spec:
               rule: self.databaseName == oldSelf.databaseName
             - message: clusterRef is immutable
               rule: self.clusterRef == oldSelf.clusterRef
+            - message: each extension schema must be declared in spec.schemas
+              rule: '!has(self.extensions) || self.extensions.all(e, !has(e.schema)
+                || (has(self.schemas) && e.schema in self.schemas))'
           status:
             description: DatabaseClaimStatus defines the observed state of DatabaseClaim.
             properties:

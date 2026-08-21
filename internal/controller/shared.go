@@ -62,6 +62,10 @@ const (
 	ReasonRoleNameConflict       = "RoleNameConflict"
 	ReasonBlockedByRoleClaims    = "BlockedByRoleClaims"
 	ReasonClaimNotAllowed        = "ClaimNotAllowed"
+	// ReasonExtensionRelocationFailed marks a claim whose extension exists in
+	// the wrong schema and could not be moved there — in practice a
+	// non-relocatable extension, which no amount of retrying will fix.
+	ReasonExtensionRelocationFailed = "ExtensionRelocationFailed"
 )
 
 // Event-only reasons for lifecycle paths that do not map cleanly to status

@@ -111,15 +111,16 @@ func (r *DatabaseClaimReconciler) reconcileNormal(ctx context.Context, claim *cn
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionClusterResolved, metav1.ConditionTrue, ReasonProvisioned, "cluster resolved")
 
 	if err := r.applyDatabase(ctx, claim, target); err != nil {
-		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconcileFailed)
-		setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseReady, metav1.ConditionFalse, ReasonReconcileFailed, err.Error())
-		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconcileFailed, err.Error())
+		reason := applyErrorReason(err)
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason)
+		setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseReady, metav1.ConditionFalse, reason, err.Error())
+		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason, err.Error())
 		claim.Status.Phase = cnpgclaimv1alpha1.DatabaseClaimPhaseFailed
 		if statusErr := r.Status().Update(ctx, claim); statusErr != nil {
 			return ctrl.Result{}, errors.Join(err, fmt.Errorf("status update after apply error: %w", statusErr))
 		}
 		if eventNeeded {
-			emitEvent(r.Recorder, claim, corev1.EventTypeWarning, ReasonReconcileFailed, err.Error())
+			emitEvent(r.Recorder, claim, corev1.EventTypeWarning, reason, err.Error())
 		}
 		return ctrl.Result{}, err
 	}
@@ -187,12 +188,26 @@ func (r *DatabaseClaimReconciler) applyDatabase(ctx context.Context, claim *cnpg
 			return err
 		}
 	}
+	// Extensions run after the schemas loop, and admission requires every
+	// extension schema to be one of spec.schemas: together that means a
+	// schema-targeted extension always finds its schema already created.
 	for _, ext := range claim.Spec.Extensions {
-		if err := postgres.EnsureExtension(ctx, dbConn, ext); err != nil {
+		if err := postgres.EnsureExtension(ctx, dbConn, ext.Name, ext.Schema); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// applyErrorReason maps a provisioning error to the Condition Reason that
+// should accompany it, so a failure an operator has to resolve by hand is not
+// reported as a generic ReconcileFailed. Mirrors resolveErrorReason.
+func applyErrorReason(err error) string {
+	var relocation *postgres.ExtensionRelocationError
+	if errors.As(err, &relocation) {
+		return ReasonExtensionRelocationFailed
+	}
+	return ReasonReconcileFailed
 }
 
 // reconcileDelete enforces the refuse-to-orphan / cascade semantics on

@@ -13,7 +13,11 @@ spec:
   schemas:
     - app
   extensions:
-    - pgcrypto
+    - name: pgcrypto
+    # Schema-targeted: installed into "app" so a role whose search_path is
+    # pinned there can resolve the extension's operators and functions.
+    - name: pg_trgm
+      schema: app
   deletionPolicy: Retain
 ---
 apiVersion: cnpg.wyvernzora.io/v1alpha1

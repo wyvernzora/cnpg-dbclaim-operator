@@ -268,6 +268,94 @@ var _ = Describe("DatabaseClaim", func() {
 			return eventCount(ctx, ns, "DatabaseClaim", newer.Name, ReasonDatabaseNameConflict, corev1.EventTypeWarning)
 		}, 20*time.Second, 500*time.Millisecond).Should(Equal(int32(1)))
 	})
+
+	It("persists the schema requested for an extension", func() {
+		ctx := context.Background()
+		name := fmt.Sprintf("ext-schema-%d", time.Now().UnixNano())
+		claim := &cnpgclaimv1alpha1.DatabaseClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: cnpgclaimv1alpha1.DatabaseClaimSpec{
+				DatabaseName:   "demo_ext_schema",
+				ClusterRef:     cnpgclaimv1alpha1.ClusterReference{Name: "no-such-cluster", Namespace: ns},
+				DeletionPolicy: cnpgclaimv1alpha1.DeletionPolicyRetain,
+				Schemas:        []string{"releases"},
+				Extensions: []cnpgclaimv1alpha1.ExtensionSpec{
+					{Name: "pg_trgm", Schema: "releases"},
+					{Name: "pgcrypto"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(context.Background(), claim)
+		})
+
+		var got cnpgclaimv1alpha1.DatabaseClaim
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, &got)).To(Succeed())
+		Expect(got.Spec.Extensions).To(Equal([]cnpgclaimv1alpha1.ExtensionSpec{
+			{Name: "pg_trgm", Schema: "releases"},
+			{Name: "pgcrypto"},
+		}))
+	})
+
+	It("rejects an extension whose schema is not declared in spec.schemas", func() {
+		ctx := context.Background()
+		cases := map[string][]string{
+			"schemas omits the extension schema": {"app"},
+			"schemas absent entirely":            nil,
+		}
+		for label, schemas := range cases {
+			By(label, func() {
+				claim := &cnpgclaimv1alpha1.DatabaseClaim{
+					ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("ext-undeclared-%d", time.Now().UnixNano()), Namespace: ns},
+					Spec: cnpgclaimv1alpha1.DatabaseClaimSpec{
+						DatabaseName:   "demo_ext_undeclared",
+						ClusterRef:     cnpgclaimv1alpha1.ClusterReference{Name: "no-such-cluster", Namespace: ns},
+						DeletionPolicy: cnpgclaimv1alpha1.DeletionPolicyRetain,
+						Schemas:        schemas,
+						Extensions:     []cnpgclaimv1alpha1.ExtensionSpec{{Name: "pg_trgm", Schema: "releases"}},
+					},
+				}
+				err := k8sClient.Create(ctx, claim)
+				if err == nil {
+					_ = k8sClient.Delete(context.Background(), claim)
+				}
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "create with schemas %v: got err %v, want Invalid", schemas, err)
+				Expect(err.Error()).To(ContainSubstring("each extension schema must be declared in spec.schemas"))
+			})
+		}
+	})
+
+	It("rejects extension entries that are not safe Postgres identifiers", func() {
+		ctx := context.Background()
+		cases := map[string]cnpgclaimv1alpha1.ExtensionSpec{
+			"bad name":   {Name: "pg-trgm"},
+			"bad schema": {Name: "pg_trgm", Schema: "Releases"},
+			"empty name": {Schema: "releases"},
+		}
+		for label, ext := range cases {
+			By(label, func() {
+				claim := &cnpgclaimv1alpha1.DatabaseClaim{
+					ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("ext-invalid-%d", time.Now().UnixNano()), Namespace: ns},
+					Spec: cnpgclaimv1alpha1.DatabaseClaimSpec{
+						DatabaseName:   "demo_ext_invalid",
+						ClusterRef:     cnpgclaimv1alpha1.ClusterReference{Name: "no-such-cluster", Namespace: ns},
+						DeletionPolicy: cnpgclaimv1alpha1.DeletionPolicyRetain,
+						// Declared so that entries with a well-formed schema
+						// fail on the identifier pattern, not the
+						// schema-must-be-declared rule.
+						Schemas:    []string{"releases"},
+						Extensions: []cnpgclaimv1alpha1.ExtensionSpec{ext},
+					},
+				}
+				err := k8sClient.Create(ctx, claim)
+				if err == nil {
+					_ = k8sClient.Delete(context.Background(), claim)
+				}
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "create with extension %+v: got err %v, want Invalid", ext, err)
+			})
+		}
+	})
 })
 
 var _ = Describe("RoleClaim", func() {
