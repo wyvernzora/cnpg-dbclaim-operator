@@ -4,7 +4,7 @@ installCRDs: true
 
 image:
   repository: ghcr.io/wyvernzora/cnpg-dbclaim-operator
-  tag: v0.3.1
+  tag: v0.4.0
   pullPolicy: IfNotPresent
 
 replicaCount: 1
