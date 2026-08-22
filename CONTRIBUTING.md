@@ -37,6 +37,21 @@ A few fixture-based tests additionally need the server's extension directory
 writable by the postgres process; they skip loudly with the exact `docker
 exec ... chmod` to run when it is not.
 
+## Git hooks and commit messages
+
+Run once after cloning:
+
+```bash
+lefthook install
+```
+
+This wires the `commit-msg` hooks in `.githooks/`: commit subjects must be
+[Conventional Commits](https://www.conventionalcommits.org/)
+(`<type>[(<scope>)][!]: <description>`, ≤ 72 chars, types
+`feat|fix|docs|refactor|test|build|ci|chore|perf|revert`, scope optional), and
+commit messages must not carry AI-assistant attribution. CI (`ci-lint.yml`)
+enforces the same subject rules on PR titles and pushed commits.
+
 ## Pull requests
 
 Run `make test` and `make lint` before opening a PR. Keep generated artifacts
