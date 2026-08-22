@@ -7,7 +7,7 @@ metadata:
 rules:
   - apiGroups: ["cnpg.wyvernzora.io"]
     resources: [databaseclaims]
-    verbs: [get, list, watch, update]
+    verbs: [get, list, watch, update, patch]
   - apiGroups: ["cnpg.wyvernzora.io"]
     resources: [roleclaims]
     verbs: [get, list, watch, update, delete]
@@ -23,7 +23,12 @@ rules:
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, list, watch, create, update, patch, delete]
+  # Both event APIs: the claim controllers record through the events.k8s.io/v1
+  # recorder, while controller-runtime's leader election still uses the core v1 one.
   - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [events.k8s.io]
     resources: [events]
     verbs: [create, patch]
 ---

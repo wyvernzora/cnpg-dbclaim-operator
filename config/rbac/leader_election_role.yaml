@@ -1,0 +1,28 @@
+# config/manager/manager.yaml passes --leader-elect, so the manager needs the
+# lease it elects on. Without this Role the leader elector retries a Forbidden
+# Get forever while the health probes stay green, and no controller ever starts.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: leader-election-role
+  namespace: system
+rules:
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch

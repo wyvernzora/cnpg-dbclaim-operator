@@ -4,7 +4,11 @@ Copyright 2026 contributors to cnpg-dbclaim-operator.
 
 package postgres
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+)
 
 func TestEnsureExtensionStmt(t *testing.T) {
 	cases := []struct {
@@ -15,9 +19,9 @@ func TestEnsureExtensionStmt(t *testing.T) {
 		wantErr   bool
 	}{
 		{
-			name:      "schema omitted keeps the server default search_path",
+			name:      "empty schema is rejected",
 			extension: "pgcrypto",
-			want:      `CREATE EXTENSION IF NOT EXISTS "pgcrypto"`,
+			wantErr:   true,
 		},
 		{
 			name:      "schema targets the extension objects",
@@ -53,6 +57,21 @@ func TestEnsureExtensionStmt(t *testing.T) {
 				t.Fatalf("ensureExtensionStmt(%q, %q) = %q, want %q", tc.extension, tc.schema, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestEnsureExtensionRequiresSchema pins the migration error for a claim still
+// stored in the v0.3.x bare-string shape: it decodes with Schema == "", and the
+// convergence path must refuse it before touching the connection (nil here).
+func TestEnsureExtensionRequiresSchema(t *testing.T) {
+	err := EnsureExtension(context.Background(), nil, "pgcrypto", "")
+	if err == nil {
+		t.Fatal(`EnsureExtension with an empty schema returned nil, want the migration error`)
+	}
+	for _, fragment := range []string{`extension "pgcrypto" has no schema`, "Upgrading from v0.3.x"} {
+		if !strings.Contains(err.Error(), fragment) {
+			t.Fatalf("EnsureExtension error %q does not contain %q", err, fragment)
+		}
 	}
 }
 

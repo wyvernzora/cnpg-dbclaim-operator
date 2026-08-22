@@ -281,7 +281,7 @@ var _ = Describe("DatabaseClaim", func() {
 				Schemas:        []string{"releases"},
 				Extensions: []cnpgclaimv1alpha1.ExtensionSpec{
 					{Name: "pg_trgm", Schema: "releases"},
-					{Name: "pgcrypto"},
+					{Name: "pgcrypto", Schema: "releases"},
 				},
 			},
 		}
@@ -294,8 +294,53 @@ var _ = Describe("DatabaseClaim", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, &got)).To(Succeed())
 		Expect(got.Spec.Extensions).To(Equal([]cnpgclaimv1alpha1.ExtensionSpec{
 			{Name: "pg_trgm", Schema: "releases"},
-			{Name: "pgcrypto"},
+			{Name: "pgcrypto", Schema: "releases"},
 		}))
+	})
+
+	It("rejects an extension entry that does not name a schema", func() {
+		ctx := context.Background()
+		claim := &cnpgclaimv1alpha1.DatabaseClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("ext-no-schema-%d", time.Now().UnixNano()), Namespace: ns},
+			Spec: cnpgclaimv1alpha1.DatabaseClaimSpec{
+				DatabaseName:   "demo_ext_no_schema",
+				ClusterRef:     cnpgclaimv1alpha1.ClusterReference{Name: "no-such-cluster", Namespace: ns},
+				DeletionPolicy: cnpgclaimv1alpha1.DeletionPolicyRetain,
+				Schemas:        []string{"releases"},
+				Extensions:     []cnpgclaimv1alpha1.ExtensionSpec{{Name: "pg_trgm"}},
+			},
+		}
+		err := k8sClient.Create(ctx, claim)
+		if err == nil {
+			_ = k8sClient.Delete(context.Background(), claim)
+		}
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "create without extension schema: got err %v, want Invalid", err)
+		Expect(err.Error()).To(ContainSubstring("Required value"))
+	})
+
+	// An empty list asks for no extension at all, so there is no schema for it
+	// to declare. A v0.3.x claim can be stored that way, and the rule has to
+	// accept it or every write to that claim — status writes included — is
+	// rejected for a spec that requests nothing. Unstructured because the Go
+	// type's omitempty drops an empty slice, so the typed client cannot spell
+	// the shape at all.
+	It("accepts an empty extensions list with no spec.schemas", func() {
+		ctx := context.Background()
+		name := fmt.Sprintf("ext-empty-%d", time.Now().UnixNano())
+		claim := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "cnpg.wyvernzora.io/v1alpha1",
+			"kind":       "DatabaseClaim",
+			"metadata":   map[string]any{"name": name, "namespace": ns},
+			"spec": map[string]any{
+				"databaseName": "demo_ext_empty",
+				"clusterRef":   map[string]any{"name": "no-such-cluster", "namespace": ns},
+				"extensions":   []any{},
+			},
+		}}
+		Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(context.Background(), claim)
+		})
 	})
 
 	It("rejects an extension whose schema is not declared in spec.schemas", func() {
@@ -329,7 +374,7 @@ var _ = Describe("DatabaseClaim", func() {
 	It("rejects extension entries that are not safe Postgres identifiers", func() {
 		ctx := context.Background()
 		cases := map[string]cnpgclaimv1alpha1.ExtensionSpec{
-			"bad name":   {Name: "pg-trgm"},
+			"bad name":   {Name: "pg-trgm", Schema: "releases"},
 			"bad schema": {Name: "pg_trgm", Schema: "Releases"},
 			"empty name": {Schema: "releases"},
 		}

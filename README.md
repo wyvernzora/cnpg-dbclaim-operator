@@ -39,34 +39,81 @@ spec:
     namespace: cnpg-system
   schemas: [app]
   extensions:
-    - name: pgcrypto              # server-default placement (public)
-    - name: pg_trgm
+    - name: pgcrypto
       schema: app                 # objects created in schema "app"
+    - name: pg_trgm
+      schema: app
   deletionPolicy: Retain          # Retain (default) | Delete
 ```
 
 #### Extension placement
 
 `CREATE EXTENSION` puts the extension's operator classes and functions in one
-schema. An application that pins its runtime `search_path` to a claimed schema
-(`search_path=app`) cannot resolve them from anywhere else — `operator class
-"gist_trgm_ops" does not exist for access method "gist"` is that failure. Set
-`extensions[].schema` to install the extension where those consumers will look:
+schema — every install lands in exactly one, and Postgres has no global
+extension. `extensions[].schema` is therefore **required**: the claim names
+that schema, and there is no server-default placement and no separate spelling
+for "global". An application that pins its runtime `search_path` to a claimed
+schema (`search_path=app`) cannot resolve those objects from anywhere else —
+`operator class "gist_trgm_ops" does not exist for access method "gist"` is
+that failure — so install the extension where its consumers will look.
 
-- **`schema` set** — a declared desired state. The extension is created with
-  `CREATE EXTENSION IF NOT EXISTS <name> SCHEMA <schema>`, and an extension
-  that already exists in a different schema is **converged** onto the declared
-  one with `ALTER EXTENSION <name> SET SCHEMA <schema>` — the same reconcile
-  CloudNativePG's own `Database` CRD performs for `extensions[].schema`. The
-  value must be one of the claim's own `spec.schemas`; a schema outside that
-  list is rejected at `kubectl apply`, and schemas are created before
-  extensions are installed, so the target always exists.
-- **`schema` omitted** — the global-by-convention case, and no opinion. Postgres
-  has no truly global extension, so there is no separate spelling for it: the
-  extension is created without a `SCHEMA` clause and lands wherever the
-  provisioning superuser's default `search_path` puts it, in practice `public`.
-  Nothing is ever relocated on this path, including an extension that already
-  lives somewhere else.
+The schema is a declared desired state. The extension is created with
+`CREATE EXTENSION IF NOT EXISTS <name> SCHEMA <schema>`, and an extension
+that already exists in a different schema is **converged** onto the declared
+one with `ALTER EXTENSION <name> SET SCHEMA <schema>` — the same reconcile
+CloudNativePG's own `Database` CRD performs for `extensions[].schema`. The
+value must be one of the claim's own `spec.schemas`; a schema outside that
+list is rejected at `kubectl apply`, and schemas are created before
+extensions are installed, so the target always exists.
+
+An extension is installed before its schema is granted out, never after.
+`CREATE EXTENSION` runs the extension's install script as superuser with
+`search_path` set to the target schema **plus the schema of every extension that
+script's version requires** (`earthdistance` sees `cube`'s schema), so an object
+a tenant planted in any of them can capture a name that script resolves.
+Reaching the default version can mean running a base script and then a chain of
+update scripts, each with its own `requires`, so the operator checks the schema
+of every extension **any** available version requires — an extension whose
+default version requires nothing is not thereby unguarded. Those schemas are
+locked against handover for the duration of the install, extension DDL by other
+sessions is blocked for the same window so a prerequisite cannot appear after
+the check decided which schemas to look at, and the target is pinned; a schema
+that another role owns or holds `CREATE` on is refused rather than installed
+into. Declaring the schema and the extension on the same
+`DatabaseClaim` is the ordinary path — extensions are installed before any
+`RoleClaim` can take the schema, and later reconciles of an already-installed
+extension are unaffected by the handover. Three consequences:
+
+- `public` is owned by `pg_database_owner`, which *is* the database owner. An
+  explicit `schema: public` works while this operator owns the database (list
+  `public` in `spec.schemas` to name it). Once an `Owner` `RoleClaim` takes the
+  database, `public` belongs to that tenant, and a **new** extension targeting
+  it is refused. Extensions already installed keep reconciling untouched.
+- Adding an extension to a schema (or a database) already handed to a tenant
+  needs that ownership or `CREATE` grant returned to the superuser for the
+  install, or a target schema no `RoleClaim` owns or holds `CREATE` on. A
+  `ReadOnly` grant (`USAGE` only) never blocks one.
+- Adding an extension whose prerequisite already lives in a tenant-held schema
+  is refused too, and picking a different target schema does not help: the
+  prerequisite's schema is on the install script's `search_path` either way.
+  Relocate the prerequisite to a schema no `RoleClaim` owns or holds `CREATE`
+  on, or return that ownership for the install.
+
+The refusal is loud: the claim goes `Failed` with the offending schema and the
+reason in the condition message and a Warning event. Nothing is installed.
+
+Those locks are taken with a 10 second `lock_timeout`. A session this operator
+does not control can hold the same catalog rows — a tenant that left a
+transaction open after its own `CREATE EXTENSION` holds the extension catalog
+against writers — and the operator reconciles claims one at a time, so the
+install gives up with `canceling statement due to lock timeout` and a Warning
+event instead of parking every other claim behind it. The next reconcile
+retries.
+
+The same 10 second `lock_timeout` is set on every connection the operator
+opens, so the statements outside that transaction — creating the schemas a
+claim declares, applying a `RoleClaim`'s role, grants and default privileges —
+are bounded the same way and fail the same loud, retried way.
 
 Convergence needs the read-back because `CREATE EXTENSION IF NOT EXISTS`
 silently ignores its `SCHEMA` clause when the extension already exists. Some
@@ -190,10 +237,15 @@ provision databases and roles.
 ```bash
 helm install dbclaim-operator \
   oci://ghcr.io/wyvernzora/charts/dbclaim-operator \
-  --version 0.3.1 \
   --namespace cnpg-dbclaim-system \
   --create-namespace
 ```
+
+This takes the latest published chart, which is the one this README documents.
+Pin a specific chart with `--version <x.y.z>` if you need a reproducible
+install — but note that `spec.extensions` changed shape across releases, so a
+pin older than the API described above will reject the manifests here (see
+[Upgrading from v0.3.x](#upgrading-from-v03x)).
 
 CRDs are installed by the chart (templates/crds/) with
 `helm.sh/resource-policy: keep` so they survive an uninstall. Pass
@@ -217,6 +269,79 @@ kustomize build config/default | kubectl apply -f -
 The Kustomize tree assumes the operator image is published as
 `cnpg-dbclaim-operator:latest`; override via a kustomize image transformer
 in your overlay.
+
+### Upgrading from v0.3.x
+
+`spec.extensions` changed from a list of strings to a list of `{name, schema}`
+objects, and `schema` is **required** — every extension names the schema its
+objects land in. v1alpha1 is the only served and stored version, so claims
+written before the upgrade stay *stored* as strings — the API server does not
+rewrite them, and the chart's CRDs are ordinary templates that `helm upgrade`
+re-applies (`helm.sh/resource-policy: keep` governs uninstall only).
+
+The operator still decodes the old shape, but a stored legacy entry carries no
+schema and the operator will not invent one. Plainly:
+
+- An unmigrated claim **fails reconciliation loudly**: every reconcile emits a
+  Warning event, and on the provisioning path that event carries a pointer to
+  this section. The `Failed` condition cannot even land on the claim — the
+  stored strings fail the new schema on every write, status included — so every
+  decision the controller records is announced as an event whether or not its
+  status write is accepted, and the events plus the controller log are the
+  signal. That holds for deletion too: a claim held back by `RoleClaim`
+  referrers still reports `BlockedByRoleClaims` as an event.
+- An unmigrated claim cannot be edited; the API server rejects any write that
+  carries the stored list. It can only be migrated (below) or deleted: on
+  deletion the operator releases its finalizer by clearing `spec.extensions`
+  with a merge patch, which is safe because deprovisioning uses only
+  `databaseName` and `deletionPolicy`.
+
+Migrating means **assigning a schema to every legacy entry** — a decision the
+command below cannot make for you. It defaults each entry to the claim's first
+`spec.schemas` entry as a starting point; **review every claim and override the
+schema per extension before running it** — the right schema is the one the
+extension's consumers pin their `search_path` to, and the first list entry is
+only a guess. A claim with no `spec.schemas` at all is skipped, because there is
+no default to assign. It cannot be given that list on its own, either: every
+write against a claim still holding strings carries them along and is rejected
+on them, whatever the patch itself says. Migrate such a claim by hand, with one
+patch that sets both fields:
+
+```bash
+kubectl -n <namespace> patch databaseclaim <name> --type merge \
+  -p '{"spec":{"schemas":["app"],"extensions":[{"name":"pgcrypto","schema":"app"}]}}'
+```
+
+An explicit `schema: public` works while the operator still owns the database —
+list `public` in `spec.schemas` in the same patch.
+
+Every other claim — the ones that do carry a `spec.schemas` — is migrated by
+this command:
+
+```bash
+kubectl get databaseclaims.cnpg.wyvernzora.io -A -o json \
+  | jq -r '.items[] | select(any(.spec.extensions[]?; type == "string"))
+      | select((.spec.schemas | length) > 0)
+      | .spec.schemas[0] as $default
+      | ([.spec.extensions[] | if type == "string" then {name: ., schema: $default} else . end]
+         | reduce .[] as $e ([]; if any(.[]; .name == $e.name) then . else . + [$e] end)) as $exts
+      | "\(.metadata.namespace) \(.metadata.name) \($exts | tojson)"' \
+  | while read -r ns name exts; do
+      kubectl -n "$ns" patch databaseclaim "$name" --type merge \
+        -p "{\"spec\":{\"extensions\":$exts}}"
+    done
+```
+
+It selects only claims still holding strings, so it is safe to re-run, and a
+JSON merge patch replaces the list wholesale — the one write the API server
+accepts against a legacy-shaped object. The `reduce` collapses repeated
+extension names to their first occurrence: the old list tolerated repeats, the
+new one is keyed by `name`, and a stored list with two identical keys is one a
+later apply cannot touch. Two things it cannot do for you: a claim holding more
+than 256 extensions exceeds what the new schema accepts and has to be trimmed by
+hand first, and the manifests in Git still need updating to the object form —
+with a `schema` on every entry, since server-side apply and `kubectl apply`
+alike reject an entry without one.
 
 ## Sample scenarios
 
