@@ -14,9 +14,13 @@ package controller
 import (
 	"cmp"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -62,6 +66,10 @@ const (
 	ReasonRoleNameConflict       = "RoleNameConflict"
 	ReasonBlockedByRoleClaims    = "BlockedByRoleClaims"
 	ReasonClaimNotAllowed        = "ClaimNotAllowed"
+	// ReasonExtensionRelocationFailed marks a claim whose extension exists in
+	// the wrong schema and could not be moved there — in practice a
+	// non-relocatable extension, which no amount of retrying will fix.
+	ReasonExtensionRelocationFailed = "ExtensionRelocationFailed"
 )
 
 // Event-only reasons for lifecycle paths that do not map cleanly to status
@@ -86,8 +94,36 @@ const clusterGoneGracePeriod = 5 * time.Minute
 // CRD endpoint and returns NotFound in envtest and real clusters. This normal
 // update path requires primary-resource update RBAC in addition to the standard
 // <resource>/finalizers rule emitted by Kubebuilder markers.
+//
+// A whole-object update re-encodes spec.extensions from the stored v0.3.x
+// bare-string shape into the object form, and those entries carry no schema —
+// a field the CRD now requires — so on an unmigrated legacy claim the update
+// is rejected as Invalid. CRD validation ratcheting does not rescue any write
+// here: the stored strings fail the item schema outright, so a metadata-only
+// patch is rejected too (TestFinalizerReleaseOnLegacyStoredClaim). For a claim
+// being deleted, fall back to a JSON merge patch that writes the remaining
+// finalizers and clears spec.extensions — acceptable only because
+// deprovisioning reads databaseName and deletionPolicy, never extensions. The
+// add-finalizer branch deliberately gets no fallback: a live claim keeps its
+// spec, fails reconciliation loudly, and is migrated instead (see "Upgrading
+// from v0.3.x" in the README). The fallback needs the patch RBAC verb on
+// databaseclaims in addition to update.
 func updateFinalizers(ctx context.Context, c client.Client, obj client.Object) error {
-	return c.Update(ctx, obj)
+	err := c.Update(ctx, obj)
+	if err == nil || !apierrors.IsInvalid(err) || obj.GetDeletionTimestamp().IsZero() {
+		return err
+	}
+	body, marshalErr := json.Marshal(map[string]any{
+		"metadata": map[string]any{"finalizers": obj.GetFinalizers()},
+		"spec":     map[string]any{"extensions": nil},
+	})
+	if marshalErr != nil {
+		return errors.Join(err, marshalErr)
+	}
+	if patchErr := c.Patch(ctx, obj, client.RawPatch(types.MergePatchType, body)); patchErr != nil {
+		return errors.Join(err, patchErr)
+	}
+	return nil
 }
 
 // Field-index keys used to register and look up cross-resource references via
@@ -149,6 +185,34 @@ func shouldEmitDeleteFailureEvent(conds []metav1.Condition, generation int64, wa
 		shouldEmitConditionEvent(conds, generation, ConditionReady, metav1.ConditionFalse, ReasonReconcileFailed)
 }
 
+// eventNoteLimit is the longest note the API server accepts on an
+// events.k8s.io/v1 Event (1024 bytes; measured against envtest 1.31.0, accepted
+// at 1024 and rejected at 1025). An over-long note is not a truncated event but
+// no event at all: the API server rejects it as Invalid and client-go's
+// broadcaster drops it without retrying.
+//
+// The messages that overrun it are the ones that matter most. updateFinalizers
+// reports an API-server Invalid error carrying one cause per stored extension —
+// past ~22 of them the note is over the limit — and that error is reported on
+// the paths where status cannot be written, so the event is the only signal
+// left.
+const eventNoteLimit = 1024
+
+const eventNoteTruncationSuffix = " [truncated]"
+
+// truncateEventNote cuts a note down to what the API server will accept, on a
+// rune boundary so the result is still valid UTF-8.
+func truncateEventNote(note string) string {
+	if len(note) <= eventNoteLimit {
+		return note
+	}
+	cut := eventNoteLimit - len(eventNoteTruncationSuffix)
+	for cut > 0 && !utf8.RuneStart(note[cut]) {
+		cut--
+	}
+	return note[:cut] + eventNoteTruncationSuffix
+}
+
 func emitEvent(recorder events.EventRecorder, obj runtime.Object, eventType, reason, message string) {
 	if recorder == nil || obj == nil {
 		return
@@ -156,7 +220,7 @@ func emitEvent(recorder events.EventRecorder, obj runtime.Object, eventType, rea
 	if message == "" {
 		message = reason
 	}
-	recorder.Eventf(obj, nil, eventType, reason, reason, "%s", message)
+	recorder.Eventf(obj, nil, eventType, reason, reason, "%s", truncateEventNote(message))
 }
 
 // objectWins reports whether a wins deterministic ownership against b:

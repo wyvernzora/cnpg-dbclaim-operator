@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -37,6 +38,21 @@ type ConnOpts struct {
 // Close it when done (typical: defer conn.Close(ctx)).
 //
 // Connections are short-lived: open per reconcile, close at the end.
+//
+// Every lock wait on the session is bounded by lockWaitTimeout. Most of what a
+// reconcile runs is a single autocommit statement — CREATE SCHEMA, ALTER ROLE,
+// the RoleClaim GRANTs and ALTER DEFAULT PRIVILEGES — and each of them waits on
+// a catalog row a session this operator does not control can hold: a tenant
+// that owns its database, or a managed role acting on itself, leaves a
+// transaction open and holds it. Each reconciler runs a single worker with no
+// deadline, so an unbounded wait parks every claim of that kind with no event,
+// no status and no error. With the bound the statement aborts with SQLSTATE
+// 55P03, the claim gets a Warning event, and the requeue retries once the other
+// session is gone. Transactions that need the same bound set it themselves
+// (boundLockWait), which also covers connections opened elsewhere.
+//
+// It is sent as a startup parameter, so it outranks any lock_timeout an
+// ALTER DATABASE/ROLE SET has left behind — a database owner can write one.
 func Open(ctx context.Context, opts ConnOpts) (*pgx.Conn, error) {
 	if opts.Port == 0 {
 		opts.Port = 5432
@@ -56,6 +72,7 @@ func Open(ctx context.Context, opts ConnOpts) (*pgx.Conn, error) {
 	}
 	q := u.Query()
 	q.Set("sslmode", opts.SSLMode)
+	q.Set("lock_timeout", strconv.FormatInt(lockWaitTimeout.Milliseconds(), 10))
 	u.RawQuery = q.Encode()
 
 	connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)

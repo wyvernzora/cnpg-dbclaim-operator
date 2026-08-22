@@ -59,7 +59,13 @@ spec:
           metadata:
             type: object
           spec:
-            description: DatabaseClaimSpec defines the desired state of DatabaseClaim.
+            description: |-
+              DatabaseClaimSpec defines the desired state of DatabaseClaim.
+              The schemas check hangs off each entry rather than off the list, so a claim
+              that asks for no extension at all — including one stored as `extensions: []`
+              by v0.3.x — needs no spec.schemas and stays writable. Hoisting it out would
+              make has(self.schemas) a precondition of the empty list too, wedging every
+              write to such a claim, status writes included.
             properties:
               clusterRef:
                 description: |-
@@ -100,15 +106,61 @@ spec:
                 type: string
               extensions:
                 description: |-
-                  Extensions to install in the database. Each entry is the Postgres
-                  extension name (e.g., "pgcrypto"). Installed at the default version
+                  Extensions to install in the database. Installed at the default version
                   via CREATE EXTENSION IF NOT EXISTS. Version updates are out of scope
-                  in v1.
+                  in v1. The list needs a cap for the admission rule cross-checking it
+                  against spec.schemas to stay inside the API server's CEL cost budget —
+                  uncapped, that rule is rejected at CRD install. The cap is far above
+                  spec.schemas' 32 because this field carried no cap at all before it
+                  became a list of objects: every claim written then must still be
+                  re-encodable into the object form, which is what a finalizer release and
+                  the documented migration both do.
                 items:
-                  pattern: ^[a-z_][a-z0-9_]{0,62}$
-                  type: string
+                  description: |-
+                    ExtensionSpec names a Postgres extension to install and the schema its
+                    objects are created in.
+                  properties:
+                    name:
+                      description: Name of the Postgres extension (e.g., "pgcrypto").
+                      maxLength: 63
+                      pattern: ^[a-z_][a-z0-9_]{0,62}$
+                      type: string
+                    schema:
+                      description: |-
+                        Schema names the one schema the extension's objects land in. Required:
+                        Postgres has no global extension — every install puts the extension's
+                        operator classes and functions in exactly one schema, and there is no
+                        server-default placement here, so the claim states which. Consumers
+                        that pin their runtime search_path to that schema can then resolve
+                        those objects.
+
+                        Must be one of spec.schemas — enforced at admission, and spec.schemas
+                        is ensured before extensions are installed, so the target schema always
+                        exists by install time.
+
+                        The schema is a declared desired state, so an extension that already
+                        exists in a different schema is relocated with ALTER EXTENSION ... SET
+                        SCHEMA, matching CloudNativePG's own Database CRD. Extensions that
+                        declare themselves non-relocatable cannot be moved; that failure
+                        surfaces as Reason=ExtensionRelocationFailed for an operator to resolve.
+
+                        Claims written by operator v0.3.x or earlier carry no schema and must
+                        be migrated — see "Upgrading from v0.3.x" in the README. The json tag
+                        keeps omitempty so a legacy-decoded entry omits the field rather than
+                        emitting ""; the explicit Required marker overrides the optionality
+                        controller-gen would otherwise infer from omitempty.
+                      maxLength: 63
+                      pattern: ^[a-z_][a-z0-9_]{0,62}$
+                      type: string
+                  required:
+                  - name
+                  - schema
+                  type: object
+                maxItems: 256
                 type: array
-                x-kubernetes-list-type: atomic
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               schemas:
                 description: |-
                   Schemas to ensure in the database. Each entry is created with
@@ -117,8 +169,10 @@ spec:
                   Removing an entry from this list is a no-op in v1; schemas must be
                   dropped manually.
                 items:
+                  maxLength: 63
                   pattern: ^[a-z_][a-z0-9_]{0,62}$
                   type: string
+                maxItems: 32
                 type: array
                 x-kubernetes-list-type: set
             required:
@@ -130,6 +184,9 @@ spec:
               rule: self.databaseName == oldSelf.databaseName
             - message: clusterRef is immutable
               rule: self.clusterRef == oldSelf.clusterRef
+            - message: each extension schema must be declared in spec.schemas
+              rule: '!has(self.extensions) || self.extensions.all(e, has(self.schemas)
+                && e.schema in self.schemas)'
           status:
             description: DatabaseClaimStatus defines the observed state of DatabaseClaim.
             properties:

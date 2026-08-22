@@ -38,9 +38,24 @@ spec:
     name: shared-pg
     namespace: cnpg-system
   schemas: [app]
-  extensions: [pgcrypto]
+  extensions:
+    - name: pgcrypto
+      schema: app                 # objects created in schema "app"
+    - name: pg_trgm
+      schema: app
   deletionPolicy: Retain          # Retain (default) | Delete
 ```
+
+`extensions[].schema` is **required** — Postgres has no global extension, so
+every install names the one schema its objects land in, and the value must be
+one of the claim's own `spec.schemas`. An extension that already exists in a
+different schema is converged onto the declared one with `ALTER EXTENSION ...
+SET SCHEMA`. Installs into a schema a tenant role owns or can write to are
+refused, and refusals, relocation failures, and lock timeouts all surface as a
+`Failed` condition with a Warning event. See
+[docs/extension-placement.md](docs/extension-placement.md) for the full
+placement semantics, the security model behind the refusals, and how to
+resolve each failure.
 
 ### RoleClaim
 
@@ -155,10 +170,15 @@ provision databases and roles.
 ```bash
 helm install dbclaim-operator \
   oci://ghcr.io/wyvernzora/charts/dbclaim-operator \
-  --version 0.3.1 \
   --namespace cnpg-dbclaim-system \
   --create-namespace
 ```
+
+This takes the latest published chart, which is the one this README documents.
+Pin a specific chart with `--version <x.y.z>` if you need a reproducible
+install — but note that `spec.extensions` changed shape across releases, so a
+pin older than the API described above will reject the manifests here (see
+[Upgrading from v0.3.x](#upgrading-from-v03x)).
 
 CRDs are installed by the chart (templates/crds/) with
 `helm.sh/resource-policy: keep` so they survive an uninstall. Pass
@@ -183,6 +203,15 @@ The Kustomize tree assumes the operator image is published as
 `cnpg-dbclaim-operator:latest`; override via a kustomize image transformer
 in your overlay.
 
+### Upgrading from v0.3.x
+
+`spec.extensions` changed from a list of strings to a list of `{name, schema}`
+objects, and `schema` is now required. Claims written before the upgrade stay
+stored in the old shape: they fail reconciliation loudly (Warning events; the
+`Failed` condition cannot land on them) and cannot be edited — only migrated
+or deleted. See [docs/upgrading-from-v0.3.md](docs/upgrading-from-v0.3.md) for
+the full behavior and the one-time migration commands.
+
 ## Sample scenarios
 
 See `config/samples/`:
@@ -201,65 +230,13 @@ kubectl get secret -n app-team-a orders-rw-credentials -o yaml
 
 ## Operations
 
-### Argo CD health checks
+Argo CD health mapping, troubleshooting, and uninstall ordering are covered in
+[docs/operations.md](docs/operations.md).
 
-Argo CD's `Synced` status only means the live Kubernetes object matches Git; it
-does not know whether this operator reconciled external Postgres state. See
-[config/samples/argocd-health-customizations.yaml](config/samples/argocd-health-customizations.yaml)
-for an `argocd-cm` customization that maps claim `Ready` conditions to Argo CD
-health.
+## Contributing
 
-### Troubleshooting
-
-- Check `DatabaseClaim.status.conditions` for CNPG cluster resolution and
-  database provisioning errors.
-- Check `RoleClaim.status.conditions` for parent `DatabaseClaim`, schema,
-  owner-conflict, SQL grant, and Secret errors.
-- Check operator logs:
-
-  ```bash
-  kubectl logs -n cnpg-dbclaim-system \
-    -l app.kubernetes.io/name=dbclaim-operator
-  ```
-
-- Verify the referenced CNPG `Cluster` is Ready and that its read-write
-  service and superuser Secret exist.
-- Verify generated credentials in the `<roleclaim>-credentials` Secret.
-
-### Uninstall
-
-For `deletionPolicy: Retain`, delete dependent `RoleClaim`s before deleting
-their `DatabaseClaim`; the operator blocks deletion while roles still refer
-to the retained database. For `deletionPolicy: Delete`, deleting the
-`DatabaseClaim` cascades through referring `RoleClaim`s and drops the
-Postgres database.
-
-Wait for finalizers to clear before removing the operator or CRDs:
-
-```bash
-kubectl get databaseclaims,roleclaims -A
-```
-
-The Helm chart keeps CRDs on uninstall. Remove them manually only after all
-`DatabaseClaim` and `RoleClaim` objects are gone:
-
-```bash
-helm uninstall dbclaim-operator -n cnpg-dbclaim-system
-kubectl delete crd databaseclaims.cnpg.wyvernzora.io roleclaims.cnpg.wyvernzora.io
-```
-
-## Development
-
-```bash
-make manifests   # regenerate CRDs/RBAC (also syncs into Helm chart)
-make build       # compile manager binary into bin/
-make test        # unit + envtest-based integration tests
-make chart-lint  # lint the Helm chart
-make docker-build IMG=cnpg-dbclaim-operator:dev
-```
-
-The operator builds against Go 1.25+; the toolchain version is pinned in
-`go.mod`. `golangci-lint` is used for static checks (`make lint`).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, build and
+test targets, and how to run the Postgres-gated integration tests.
 
 ## Status
 

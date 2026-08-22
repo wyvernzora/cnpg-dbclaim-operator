@@ -42,13 +42,14 @@ type DatabaseClaimReconciler struct {
 	Scheme    *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=databaseclaims,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=databaseclaims,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=databaseclaims/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=databaseclaims/finalizers,verbs=update
 // +kubebuilder:rbac:groups=cnpg.wyvernzora.io,resources=roleclaims,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile implements the DatabaseClaim reconcile loop.
 func (r *DatabaseClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -67,11 +68,56 @@ func (r *DatabaseClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if !controllerutil.ContainsFinalizer(&claim, DatabaseClaimFinalizer) {
 		controllerutil.AddFinalizer(&claim, DatabaseClaimFinalizer)
 		if err := updateFinalizers(ctx, r.Client, &claim); err != nil {
+			// Nothing has reached status yet and this claim's writes are the
+			// ones failing, so the event is the only signal available. A
+			// conflict is the ordinary resourceVersion race and is retried
+			// silently; anything else is worth waking someone for.
+			if !apierrors.IsConflict(err) {
+				emitEvent(r.Recorder, &claim, corev1.EventTypeWarning, ReasonReconcileFailed, err.Error())
+			}
 			return ctrl.Result{}, err
 		}
 	}
 
 	return r.reconcileNormal(ctx, &claim)
+}
+
+// writeStatus persists the claim's status and emits the event that accompanies
+// the decision just recorded.
+//
+// A rejected write does not suppress the event, which is the whole point of
+// routing every status write through here. On an unmigrated legacy claim every
+// write carrying the stored spec is rejected — status writes included, because
+// the spec-level CEL rule is evaluated against the stored bare strings
+// (TestFinalizerReleaseOnLegacyStoredClaim) — so gating the event on the write
+// going through silences the claim exactly when an operator needs to be told
+// why it is stuck.
+//
+// A conflict is the one exception: it is the ordinary resourceVersion race, and
+// the next reconcile re-reads the claim, records the same condition and emits
+// then, so emitting here as well would report the same decision twice. Callers
+// decide what to do with the error.
+//
+// emit is the callers' de-duplication: it is false when the stored condition
+// already says what this decision says. That premise only holds for a write
+// that lands — a rejected write leaves the stored condition exactly as it was,
+// so on the next reconcile emit is false again, and a legacy claim whose
+// pre-upgrade condition already matched would never emit at all. When the write
+// is rejected, emit is therefore ignored and the event goes out.
+func (r *DatabaseClaimReconciler) writeStatus(
+	ctx context.Context,
+	claim *cnpgclaimv1alpha1.DatabaseClaim,
+	emit bool,
+	eventType, reason, message string,
+) error {
+	err := r.Status().Update(ctx, claim)
+	if apierrors.IsConflict(err) {
+		return err
+	}
+	if emit || err != nil {
+		emitEvent(r.Recorder, claim, eventType, reason, message)
+	}
+	return err
 }
 
 func (r *DatabaseClaimReconciler) reconcileNormal(ctx context.Context, claim *cnpgclaimv1alpha1.DatabaseClaim) (ctrl.Result, error) {
@@ -86,11 +132,8 @@ func (r *DatabaseClaimReconciler) reconcileNormal(ctx context.Context, claim *cn
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseReady, metav1.ConditionFalse, ReasonDatabaseNameConflict, conflict)
 		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonDatabaseNameConflict, conflict)
 		claim.Status.Phase = cnpgclaimv1alpha1.DatabaseClaimPhasePending
-		if err := r.Status().Update(ctx, claim); err != nil {
+		if err := r.writeStatus(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonDatabaseNameConflict, conflict); err != nil {
 			return ctrl.Result{}, err
-		}
-		if eventNeeded {
-			emitEvent(r.Recorder, claim, corev1.EventTypeWarning, ReasonDatabaseNameConflict, conflict)
 		}
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
@@ -111,15 +154,13 @@ func (r *DatabaseClaimReconciler) reconcileNormal(ctx context.Context, claim *cn
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionClusterResolved, metav1.ConditionTrue, ReasonProvisioned, "cluster resolved")
 
 	if err := r.applyDatabase(ctx, claim, target); err != nil {
-		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconcileFailed)
-		setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseReady, metav1.ConditionFalse, ReasonReconcileFailed, err.Error())
-		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconcileFailed, err.Error())
+		reason := applyErrorReason(err)
+		eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason)
+		setCondition(&claim.Status.Conditions, claim.Generation, ConditionDatabaseReady, metav1.ConditionFalse, reason, err.Error())
+		setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason, err.Error())
 		claim.Status.Phase = cnpgclaimv1alpha1.DatabaseClaimPhaseFailed
-		if statusErr := r.Status().Update(ctx, claim); statusErr != nil {
+		if statusErr := r.writeStatus(ctx, claim, eventNeeded, corev1.EventTypeWarning, reason, err.Error()); statusErr != nil {
 			return ctrl.Result{}, errors.Join(err, fmt.Errorf("status update after apply error: %w", statusErr))
-		}
-		if eventNeeded {
-			emitEvent(r.Recorder, claim, corev1.EventTypeWarning, ReasonReconcileFailed, err.Error())
 		}
 		return ctrl.Result{}, err
 	}
@@ -150,11 +191,8 @@ func (r *DatabaseClaimReconciler) handleResolveError(ctx context.Context, claim 
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionClusterResolved, metav1.ConditionFalse, reason, err.Error())
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, reason, err.Error())
 	claim.Status.Phase = cnpgclaimv1alpha1.DatabaseClaimPhasePending
-	if statusErr := r.Status().Update(ctx, claim); statusErr != nil {
+	if statusErr := r.writeStatus(ctx, claim, eventNeeded, corev1.EventTypeWarning, reason, err.Error()); statusErr != nil {
 		return ctrl.Result{}, statusErr
-	}
-	if eventNeeded {
-		emitEvent(r.Recorder, claim, corev1.EventTypeWarning, reason, err.Error())
 	}
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
@@ -187,12 +225,26 @@ func (r *DatabaseClaimReconciler) applyDatabase(ctx context.Context, claim *cnpg
 			return err
 		}
 	}
+	// Extensions run after the schemas loop, and admission requires every
+	// extension schema to be one of spec.schemas: together that means a
+	// schema-targeted extension always finds its schema already created.
 	for _, ext := range claim.Spec.Extensions {
-		if err := postgres.EnsureExtension(ctx, dbConn, ext); err != nil {
+		if err := postgres.EnsureExtension(ctx, dbConn, ext.Name, ext.Schema); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// applyErrorReason maps a provisioning error to the Condition Reason that
+// should accompany it, so a failure an operator has to resolve by hand is not
+// reported as a generic ReconcileFailed. Mirrors resolveErrorReason.
+func applyErrorReason(err error) string {
+	var relocation *postgres.ExtensionRelocationError
+	if errors.As(err, &relocation) {
+		return ReasonExtensionRelocationFailed
+	}
+	return ReasonReconcileFailed
 }
 
 // reconcileDelete enforces the refuse-to-orphan / cascade semantics on
@@ -226,11 +278,8 @@ func (r *DatabaseClaimReconciler) reconcileDelete(ctx context.Context, claim *cn
 			message := fmt.Sprintf("cascading deletion of %d RoleClaim(s)", len(referrers))
 			eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconciling)
 			setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconciling, message)
-			if err := r.Status().Update(ctx, claim); err != nil {
+			if err := r.writeStatus(ctx, claim, eventNeeded, corev1.EventTypeNormal, ReasonReconciling, message); err != nil {
 				return ctrl.Result{}, err
-			}
-			if eventNeeded {
-				emitEvent(r.Recorder, claim, corev1.EventTypeNormal, ReasonReconciling, message)
 			}
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
@@ -267,11 +316,8 @@ func (r *DatabaseClaimReconciler) reconcileDelete(ctx context.Context, claim *cn
 			message := fmt.Sprintf("RoleClaims still reference this DatabaseClaim: %v", names)
 			eventNeeded := shouldEmitConditionEvent(claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonBlockedByRoleClaims)
 			setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonBlockedByRoleClaims, message)
-			if err := r.Status().Update(ctx, claim); err != nil {
+			if err := r.writeStatus(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonBlockedByRoleClaims, message); err != nil {
 				return ctrl.Result{}, err
-			}
-			if eventNeeded {
-				emitEvent(r.Recorder, claim, corev1.EventTypeWarning, ReasonBlockedByRoleClaims, message)
 			}
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
@@ -282,6 +328,14 @@ func (r *DatabaseClaimReconciler) reconcileDelete(ctx context.Context, claim *cn
 
 	controllerutil.RemoveFinalizer(claim, DatabaseClaimFinalizer)
 	if err := updateFinalizers(ctx, r.Client, claim); err != nil {
+		// The teardown decision is made and the claim is one write away from
+		// gone; if that write keeps failing the claim sits Terminating forever.
+		// Status cannot carry the reason on a legacy claim, so — as on the
+		// add-finalizer branch — the event is the signal. Conflicts are the
+		// ordinary resourceVersion race and are retried silently.
+		if !apierrors.IsConflict(err) {
+			emitEvent(r.Recorder, claim, corev1.EventTypeWarning, ReasonReconcileFailed, err.Error())
+		}
 		return ctrl.Result{}, err
 	}
 	emitEvent(r.Recorder, claim, corev1.EventTypeNormal, teardownReason, teardownMessage)
@@ -293,11 +347,8 @@ func (r *DatabaseClaimReconciler) failDelete(ctx context.Context, claim *cnpgcla
 	eventNeeded := shouldEmitDeleteFailureEvent(claim.Status.Conditions, claim.Generation, claim.Status.Phase == cnpgclaimv1alpha1.DatabaseClaimPhaseTerminating)
 	setCondition(&claim.Status.Conditions, claim.Generation, ConditionReady, metav1.ConditionFalse, ReasonReconcileFailed, message)
 	claim.Status.Phase = cnpgclaimv1alpha1.DatabaseClaimPhaseTerminating
-	if statusErr := r.Status().Update(ctx, claim); statusErr != nil {
+	if statusErr := r.writeStatus(ctx, claim, eventNeeded, corev1.EventTypeWarning, ReasonReconcileFailed, message); statusErr != nil {
 		return ctrl.Result{}, errors.Join(err, fmt.Errorf("status update after delete error: %w", statusErr))
-	}
-	if eventNeeded {
-		emitEvent(r.Recorder, claim, corev1.EventTypeWarning, ReasonReconcileFailed, message)
 	}
 	return ctrl.Result{}, err
 }
