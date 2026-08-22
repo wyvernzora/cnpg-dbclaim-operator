@@ -1,0 +1,6 @@
+commit-msg:
+  commands:
+    block-ai-brand:
+      run: ./.githooks/block-ai-brand-commit-msg.sh {1}
+    check-subject-format:
+      run: ./.githooks/check-commit-subject.sh {1}
