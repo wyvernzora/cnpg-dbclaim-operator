@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/cloudnative-pg/cloudnative-pg v1.30.0
 	github.com/google/go-cmp v0.7.0
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/lib/pq v1.12.3
 	github.com/onsi/ginkgo/v2 v2.32.1
 	github.com/onsi/gomega v1.42.1
